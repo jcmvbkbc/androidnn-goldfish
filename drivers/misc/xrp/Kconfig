@@ -14,6 +14,14 @@ config XRP
 	  To compile this driver as a module, choose M here: the
 	  module will be called xrp.
 
+config XRP_DEBUG
+	bool "Debug XRP"
+	depends on XRP
+	help
+	  This enables verbose debug output of the XRP driver.
+
+	  If unsure, say N.
+
 config XRP_HW_SIMPLE
 	tristate "XRP for simple hardware"
 	depends on XRP
