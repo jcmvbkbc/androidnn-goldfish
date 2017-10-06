@@ -29,3 +29,4 @@ xrp-$(CONFIG_OF) += xrp_firmware.o
 
 obj-$(CONFIG_XRP) += xrp.o
 obj-$(CONFIG_XRP_HW_SIMPLE) += xrp_hw_simple.o
+ccflags-$(CONFIG_XRP_DEBUG) += -DDEBUG
