@@ -961,6 +961,7 @@ struct xrp_request {
 		struct xrp_mapping dsp_buffer_mapping;
 		struct xrp_dsp_buffer buffer_data[XRP_DSP_CMD_INLINE_BUFFER_COUNT];
 	};
+	u8 nsid[XRP_DSP_CMD_NAMESPACE_ID_SIZE];
 };
 
 static void xrp_unmap_request_nowb(struct file *filp, struct xrp_request *rq)
@@ -1050,6 +1051,13 @@ static long xrp_map_request(struct file *filp, struct xrp_request *rq,
 	size_t i;
 	long ret = 0;
 
+	if ((rq->ioctl_queue.flags & XRP_QUEUE_FLAG_NSID) &&
+	    copy_from_user(rq->nsid,
+			   (void __user *)(unsigned long)rq->ioctl_queue.nsid_addr,
+			   sizeof(rq->nsid))) {
+		pr_debug("%s: nsid could not be copied\n ", __func__);
+		return -EINVAL;
+	}
 	rq->n_buffers = n_buffers;
 	if (n_buffers) {
 		rq->buffer_mapping =
@@ -1180,6 +1188,9 @@ static void xrp_fill_hw_request(struct xrp_dsp_cmd __iomem *cmd,
 		xrp_comm_write(&cmd->buffer_data, rq->dsp_buffer,
 			       rq->n_buffers * sizeof(struct xrp_dsp_buffer));
 
+	if (rq->ioctl_queue.flags & XRP_QUEUE_FLAG_NSID)
+		xrp_comm_write(&cmd->nsid, rq->nsid, sizeof(rq->nsid));
+
 #ifdef DEBUG
 	{
 		struct xrp_dsp_cmd dsp_cmd;
@@ -1196,15 +1207,18 @@ static void xrp_fill_hw_request(struct xrp_dsp_cmd __iomem *cmd,
 			 XRP_DSP_CMD_FLAG_REQUEST_VALID);
 }
 
-static void xrp_complete_hw_request(struct xrp_dsp_cmd __iomem *cmd,
+static long xrp_complete_hw_request(struct xrp_dsp_cmd __iomem *cmd,
 				    struct xrp_request *rq)
 {
+	u32 flags = xrp_comm_read32(&cmd->flags);
+
 	if (rq->ioctl_queue.out_data_size <= XRP_DSP_CMD_INLINE_DATA_SIZE)
 		xrp_comm_read(&cmd->out_data, rq->out_data,
 			      rq->ioctl_queue.out_data_size);
 	if (rq->n_buffers <= XRP_DSP_CMD_INLINE_BUFFER_COUNT)
 		xrp_comm_read(&cmd->buffer_data, rq->dsp_buffer,
 			      rq->n_buffers * sizeof(struct xrp_dsp_buffer));
+	return (flags & XRP_DSP_CMD_FLAG_RESPONSE_DELIVERY_FAIL) ? -ENXIO : 0;
 }
 
 static long xrp_ioctl_submit_sync(struct file *filp,
@@ -1212,20 +1226,21 @@ static long xrp_ioctl_submit_sync(struct file *filp,
 {
 	struct xvp_file *xvp_file = filp->private_data;
 	struct xvp *xvp = xvp_file->xvp;
-	struct xrp_request *rq = kzalloc(sizeof(*rq), GFP_KERNEL);
+	struct xrp_request xrp_rq, *rq = &xrp_rq;
 	long ret = 0;
-
-	if (!rq)
-		return -ENOMEM;
 
 	if (copy_from_user(&rq->ioctl_queue, p, sizeof(*p)))
 		return -EFAULT;
 
-	ret = xrp_map_request(filp, rq, current->mm);
-	if (ret < 0) {
-		kfree(rq);
-		return ret;
+	if (rq->ioctl_queue.flags & ~XRP_QUEUE_VALID_FLAGS) {
+		dev_dbg(xvp->dev, "%s: invalid flags 0x%08x\n",
+			__func__, rq->ioctl_queue.flags);
+		return -EINVAL;
 	}
+
+	ret = xrp_map_request(filp, rq, current->mm);
+	if (ret < 0)
+		return ret;
 
 	if (loopback < LOOPBACK_NOIO) {
 		mutex_lock(&xvp->comm_lock);
@@ -1243,7 +1258,7 @@ static long xrp_ioctl_submit_sync(struct file *filp,
 
 		/* copy back inline data */
 		if (ret == 0) {
-			xrp_complete_hw_request(xvp->comm, rq);
+			ret = xrp_complete_hw_request(xvp->comm, rq);
 		} else if (ret == -EBUSY && firmware_reboot) {
 			int rc;
 
@@ -1259,7 +1274,6 @@ static long xrp_ioctl_submit_sync(struct file *filp,
 		ret = xrp_unmap_request(filp, rq);
 	else
 		xrp_unmap_request_nowb(filp, rq);
-	kfree(rq);
 
 	return ret;
 }
@@ -1282,6 +1296,7 @@ static long xvp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 
 	case XRP_IOCTL_QUEUE:
+	case XRP_IOCTL_QUEUE_NS:
 		retval = xrp_ioctl_submit_sync(filp,
 					       (struct xrp_ioctl_queue __user *)arg);
 		break;
@@ -1510,6 +1525,13 @@ static int xrp_init_regs_v1(struct platform_device *pdev, struct xvp *xvp)
 	if (!mem)
 		return -ENODEV;
 
+	if (resource_size(mem) < 2 * PAGE_SIZE) {
+		dev_err(xvp->dev,
+			"%s: shared memory size is too small\n",
+			__func__);
+		return -ENOMEM;
+	}
+
 	xvp->comm_phys = mem->start;
 	xvp->pmem = mem->start + PAGE_SIZE;
 	xvp->shared_size = resource_size(mem) - PAGE_SIZE;
@@ -1685,8 +1707,7 @@ static int xrp_probe(struct platform_device *pdev)
 
 	        match = of_match_device(xrp_of_match, &pdev->dev);
 		init = match->data;
-		if (init)
-			return init(pdev, xvp, &hw_ops, NULL);
+		return init(pdev, xvp, &hw_ops, NULL);
 	}
 #endif
 #ifdef CONFIG_ACPI
