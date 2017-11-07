@@ -58,7 +58,7 @@
 #include "xrp_private_alloc.h"
 
 #define DRIVER_NAME "xrp"
-#define XVP_TIMEOUT_JIFFIES (HZ * 10)
+#define XRP_DEFAULT_TIMEOUT 10
 
 #ifndef __io_virt
 #define __io_virt(a) ((void __force *)(a))
@@ -99,6 +99,10 @@ struct xrp_known_file {
 	void *filp;
 	struct hlist_node node;
 };
+
+static int firmware_command_timeout = XRP_DEFAULT_TIMEOUT;
+module_param(firmware_command_timeout, int, 0644);
+MODULE_PARM_DESC(firmware_command_timeout, "Firmware command timeout in seconds.");
 
 static int firmware_reboot = 1;
 module_param(firmware_reboot, int, 0644);
@@ -229,7 +233,7 @@ static int xrp_synchronize(struct xvp *xvp)
 {
 	size_t sz;
 	void *hw_sync_data;
-	unsigned long deadline = jiffies + XVP_TIMEOUT_JIFFIES;
+	unsigned long deadline = jiffies + firmware_command_timeout * HZ;
 	struct xrp_dsp_sync __iomem *shared_sync = xvp->comm;
 	int ret;
 	u32 v;
@@ -276,7 +280,7 @@ static int xrp_synchronize(struct xvp *xvp)
 
 	if (xvp->host_irq_mode) {
 		int res = wait_for_completion_timeout(&xvp->completion,
-						      XVP_TIMEOUT_JIFFIES);
+						      firmware_command_timeout * HZ);
 		if (res == 0) {
 			dev_err(xvp->dev,
 				"host IRQ mode is requested, but DSP couldn't deliver IRQ during synchronization\n");
@@ -998,7 +1002,7 @@ static long xvp_complete_cmd_irq(struct completion *completion,
 				 bool (*cmd_complete)(void *p),
 				 void *p)
 {
-	long timeout = XVP_TIMEOUT_JIFFIES;
+	long timeout = firmware_command_timeout * HZ;
 
 	do {
 		timeout = wait_for_completion_interruptible_timeout(completion,
@@ -1015,7 +1019,7 @@ static long xvp_complete_cmd_irq(struct completion *completion,
 static long xvp_complete_cmd_poll(bool (*cmd_complete)(void *p),
 				  void *p)
 {
-	unsigned long deadline = jiffies + XVP_TIMEOUT_JIFFIES;
+	unsigned long deadline = jiffies + firmware_command_timeout * HZ;
 
 	do {
 		if (cmd_complete(p))
@@ -1313,6 +1317,7 @@ static long xrp_ioctl_submit_sync(struct file *filp,
 	struct xvp *xvp = xvp_file->xvp;
 	struct xrp_request xrp_rq, *rq = &xrp_rq;
 	long ret = 0;
+	bool went_off = false;
 
 	if (copy_from_user(&rq->ioctl_queue, p, sizeof(*p)))
 		return -EFAULT;
@@ -1330,35 +1335,51 @@ static long xrp_ioctl_submit_sync(struct file *filp,
 	if (loopback < LOOPBACK_NOIO) {
 		mutex_lock(&xvp->comm_lock);
 
-		xrp_fill_hw_request(xvp->comm, rq, &xvp->address_map);
-
-		xrp_send_device_irq(xvp);
-
-		if (xvp->host_irq_mode) {
-			ret = xvp_complete_cmd_irq(&xvp->completion,
-						   xrp_cmd_complete, xvp);
+		if (xvp->off) {
+			ret = -ENODEV;
 		} else {
-			ret = xvp_complete_cmd_poll(xrp_cmd_complete, xvp);
-		}
+			xrp_fill_hw_request(xvp->comm, rq, &xvp->address_map);
 
-		/* copy back inline data */
-		if (ret == 0) {
-			ret = xrp_complete_hw_request(xvp->comm, rq);
-		} else if (ret == -EBUSY && firmware_reboot) {
-			int rc;
+			xrp_send_device_irq(xvp);
 
-			pr_debug("%s: restarting firmware...\n", __func__);
-			rc = xrp_boot_firmware(xvp);
-			if (rc < 0)
-				ret = rc;
+			if (xvp->host_irq_mode) {
+				ret = xvp_complete_cmd_irq(&xvp->completion,
+							   xrp_cmd_complete,
+							   xvp);
+			} else {
+				ret = xvp_complete_cmd_poll(xrp_cmd_complete,
+							    xvp);
+			}
+
+			/* copy back inline data */
+			if (ret == 0) {
+				ret = xrp_complete_hw_request(xvp->comm, rq);
+			} else if (ret == -EBUSY && firmware_reboot) {
+				int rc;
+
+				dev_dbg(xvp->dev,
+					"%s: restarting firmware...\n",
+					 __func__);
+				rc = xrp_boot_firmware(xvp);
+				if (rc < 0) {
+					ret = rc;
+					went_off = xvp->off;
+				}
+			}
 		}
 		mutex_unlock(&xvp->comm_lock);
 	}
 
 	if (ret == 0)
 		ret = xrp_unmap_request(filp, rq);
-	else
+	else if (!went_off)
 		xrp_unmap_request_nowb(filp, rq);
+	/*
+	 * Otherwise (if the DSP went off) all mapped buffers are leaked here.
+	 * There seems to be no way to recover them as we don't know what's
+	 * going on with the DSP; the DSP may still be reading and writing
+	 * this memory.
+	 */
 
 	return ret;
 }
@@ -1536,8 +1557,12 @@ static int xrp_boot_firmware(struct xvp *xvp)
 		ret = xrp_synchronize(xvp);
 		if (ret < 0) {
 			xrp_halt_dsp(xvp);
-			pr_err("%s: couldn't synchronize with IVP core\n",
-			       __func__);
+			dev_err(xvp->dev,
+				"%s: couldn't synchronize with the DSP core\n",
+				__func__);
+			dev_err(xvp->dev,
+				"XRP device will not use the DSP until the driver is rebound to this device\n");
+			xvp->off = true;
 			return ret;
 		}
 	}
@@ -1566,17 +1591,23 @@ EXPORT_SYMBOL(xrp_runtime_suspend);
 int xrp_runtime_resume(struct device *dev)
 {
 	struct xvp *xvp = dev_get_drvdata(dev);
-	int ret;
+	int ret = 0;
 
+	mutex_lock(&xvp->comm_lock);
+	if (xvp->off)
+		goto out;
 	ret = xvp_enable_dsp(xvp);
 	if (ret < 0) {
 		dev_err(xvp->dev, "couldn't enable DSP\n");
-		return ret;
+		goto out;
 	}
 
 	ret = xrp_boot_firmware(xvp);
 	if (ret < 0)
 		xvp_disable_dsp(xvp);
+
+out:
+	mutex_unlock(&xvp->comm_lock);
 
 	return ret;
 }
