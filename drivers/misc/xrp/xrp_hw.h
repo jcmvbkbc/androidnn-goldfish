@@ -29,6 +29,7 @@
 #ifndef _XRP_HW
 #define _XRP_HW
 
+#include <linux/irqreturn.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
 
@@ -53,16 +54,23 @@ struct xrp_hw_ops {
 
 	void (*clean_cache)(void *vaddr, phys_addr_t paddr, unsigned long sz);
 	void (*flush_cache)(void *vaddr, phys_addr_t paddr, unsigned long sz);
-	void (*invalidate_cache)(void *vaddr, phys_addr_t paddr,
-				 unsigned long sz);
+
+	/* memcpy data/code to device-specific memory */
+	void (*memcpy_tohw)(void __iomem *dst, const void *src, size_t sz);
+	/* memset device-specific memory */
+	void (*memset_hw)(void __iomem *dst, int c, size_t sz);
 };
 
-int xrp_init(struct platform_device *pdev, struct xvp *xvp,
-	     const struct xrp_hw_ops *hw, void *hw_arg);
-int xrp_init_v1(struct platform_device *pdev, struct xvp *xvp,
-		const struct xrp_hw_ops *hw, void *hw_arg);
-int xrp_init_cma(struct platform_device *pdev, struct xvp *xvp,
+enum xrp_init_flags {
+	XRP_INIT_USE_HOST_IRQ = 0x1,
+};
+
+long xrp_init(struct platform_device *pdev, enum xrp_init_flags flags,
+	      const struct xrp_hw_ops *hw, void *hw_arg);
+long xrp_init_v1(struct platform_device *pdev, enum xrp_init_flags flags,
 		 const struct xrp_hw_ops *hw, void *hw_arg);
+long xrp_init_cma(struct platform_device *pdev, enum xrp_init_flags flags,
+		  const struct xrp_hw_ops *hw, void *hw_arg);
 
 int xrp_deinit(struct platform_device *pdev);
 irqreturn_t xrp_irq_handler(int irq, struct xvp *xvp);

@@ -34,6 +34,7 @@
 #include <linux/fs.h>
 #include <linux/hashtable.h>
 #include <linux/highmem.h>
+#include <linux/idr.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -121,9 +122,32 @@ MODULE_PARM_DESC(loopback, "Don't use actual DSP, perform everything locally.");
 static DEFINE_HASHTABLE(xrp_known_files, 10);
 static DEFINE_SPINLOCK(xrp_known_files_lock);
 
-static unsigned xvp_nodeid;
+static DEFINE_IDA(xvp_nodeid);
 
 static int xrp_boot_firmware(struct xvp *xvp);
+
+static const enum dma_data_direction xrp_dma_direction[] = {
+	[0] = DMA_NONE,
+	[XRP_FLAG_READ] = DMA_TO_DEVICE,
+	[XRP_FLAG_WRITE] = DMA_FROM_DEVICE,
+	[XRP_FLAG_READ_WRITE] = DMA_BIDIRECTIONAL,
+};
+
+static inline void xrp_dma_sync_for_device(struct xvp *xvp, phys_addr_t phys,
+					   unsigned long size,
+					   unsigned long flags)
+{
+	dma_sync_single_for_device(xvp->dev, phys, size,
+				   xrp_dma_direction[flags & XRP_FLAG_READ_WRITE]);
+}
+
+static inline void xrp_dma_sync_for_cpu(struct xvp *xvp, phys_addr_t phys,
+					unsigned long size,
+					unsigned long flags)
+{
+	dma_sync_single_for_cpu(xvp->dev, phys, size,
+				xrp_dma_direction[flags & XRP_FLAG_READ_WRITE]);
+}
 
 static inline void xrp_comm_write32(volatile void __iomem *addr, u32 v)
 {
@@ -554,7 +578,8 @@ out:
 
 static long _xrp_copy_user_phys(struct xvp *xvp,
 				unsigned long vaddr, unsigned long size,
-				phys_addr_t paddr, bool to_phys)
+				phys_addr_t paddr, unsigned long flags,
+				bool to_phys)
 {
 	if (pfn_valid(__phys_to_pfn(paddr))) {
 		struct page *page = pfn_to_page(__phys_to_pfn(paddr));
@@ -562,8 +587,7 @@ static long _xrp_copy_user_phys(struct xvp *xvp,
 		size_t offs;
 
 		if (!to_phys)
-			dma_sync_single_for_cpu(xvp->dev, paddr, size,
-						DMA_FROM_DEVICE);
+			xrp_dma_sync_for_cpu(xvp, paddr, size, flags);
 		for (offs = 0; offs < size; ++page) {
 			void *p = kmap(page);
 			size_t sz = PAGE_SIZE - page_offs;
@@ -592,8 +616,7 @@ static long _xrp_copy_user_phys(struct xvp *xvp,
 				return -EFAULT;
 		}
 		if (to_phys)
-			dma_sync_single_for_device(xvp->dev, paddr, size,
-						   DMA_TO_DEVICE);
+			xrp_dma_sync_for_device(xvp, paddr, size, flags);
 	} else {
 		void __iomem *p = ioremap(paddr, size);
 		unsigned long rc;
@@ -619,16 +642,16 @@ static long _xrp_copy_user_phys(struct xvp *xvp,
 
 static long xrp_copy_user_to_phys(struct xvp *xvp,
 				  unsigned long vaddr, unsigned long size,
-				  phys_addr_t paddr)
+				  phys_addr_t paddr, unsigned long flags)
 {
-	return _xrp_copy_user_phys(xvp, vaddr, size, paddr, true);
+	return _xrp_copy_user_phys(xvp, vaddr, size, paddr, flags, true);
 }
 
 static long xrp_copy_user_from_phys(struct xvp *xvp,
 				    unsigned long vaddr, unsigned long size,
-				    phys_addr_t paddr)
+				    phys_addr_t paddr, unsigned long flags)
 {
-	return _xrp_copy_user_phys(xvp, vaddr, size, paddr, false);
+	return _xrp_copy_user_phys(xvp, vaddr, size, paddr, flags, false);
 }
 
 static long xvp_copy_virt_to_phys(struct xvp_file *xvp_file,
@@ -654,7 +677,7 @@ static long xvp_copy_virt_to_phys(struct xvp_file *xvp_file,
 
 	if (flags & XRP_FLAG_READ) {
 		if (xrp_copy_user_to_phys(xvp_file->xvp,
-					  vaddr, size, phys)) {
+					  vaddr, size, phys, flags)) {
 			xrp_allocation_put(allocation);
 			return -EFAULT;
 		}
@@ -726,15 +749,19 @@ static long xrp_share_kernel(struct file *filp,
 		mapping->type = XRP_MAPPING_KERNEL;
 		*paddr = phys;
 
-		if (flags & XRP_FLAG_WRITE) {
-			xvp->hw_ops->flush_cache((void *)virt, phys, size);
-		} else if (flags & XRP_FLAG_READ) {
-			xvp->hw_ops->clean_cache((void *)virt, phys, size);
-		}
+		xrp_dma_sync_for_device(xvp, phys, size, flags);
 	}
 	pr_debug("%s: mapping = %p, mapping->type = %d\n",
 		 __func__, mapping, mapping->type);
 	return err;
+}
+
+static bool vma_needs_cache_ops(struct vm_area_struct *vma)
+{
+	pgprot_t prot = vma->vm_page_prot;
+
+	return pgprot_val(prot) != pgprot_val(pgprot_noncached(prot)) &&
+		pgprot_val(prot) != pgprot_val(pgprot_writecombine(prot));
 }
 
 /* Share blocks of memory, from host to IVP or back.
@@ -835,17 +862,23 @@ static long __xrp_share_block(struct file *filp,
 		pr_debug("%s: non-XVP allocation at 0x%08lx\n",
 			 __func__, virt);
 
-		if (vma && vma->vm_flags & (VM_IO | VM_PFNMAP)) {
-			rc = xvp_pfn_virt_to_phys(xvp_file, vma,
-						  virt, size,
-						  &phys,
-						  alien_mapping);
+		if (xvp->hw_ops->clean_cache ||
+		    (vma && !vma_needs_cache_ops(vma))) {
+			if (vma && vma->vm_flags & (VM_IO | VM_PFNMAP)) {
+				rc = xvp_pfn_virt_to_phys(xvp_file, vma,
+							  virt, size,
+							  &phys,
+							  alien_mapping);
+			} else {
+				up_read(&mm->mmap_sem);
+				rc = xvp_gup_virt_to_phys(xvp_file, virt,
+							  size, &phys,
+							  alien_mapping);
+				down_read(&mm->mmap_sem);
+			}
 		} else {
-			up_read(&mm->mmap_sem);
-			rc = xvp_gup_virt_to_phys(xvp_file, virt,
-						  size, &phys,
-						  alien_mapping);
-			down_read(&mm->mmap_sem);
+			pr_debug("%s: not mapping directly: no HW cache ops\n",
+				 __func__);
 		}
 
 		/*
@@ -875,7 +908,7 @@ static long __xrp_share_block(struct file *filp,
 	pr_debug("%s: mapping = %p, mapping->type = %d\n",
 		 __func__, mapping, mapping->type);
 
-	if (do_cache) {
+	if (do_cache && xvp->hw_ops->clean_cache) {
 		if (flags & XRP_FLAG_WRITE) {
 			xvp->hw_ops->flush_cache((void *)virt, phys, size);
 		} else if (flags & XRP_FLAG_READ) {
@@ -886,7 +919,8 @@ static long __xrp_share_block(struct file *filp,
 }
 
 static long xrp_writeback_alien_mapping(struct xvp_file *xvp_file,
-					struct xrp_alien_mapping *alien_mapping)
+					struct xrp_alien_mapping *alien_mapping,
+					unsigned long flags)
 {
 	struct page *page;
 	size_t nr_pages;
@@ -914,7 +948,8 @@ static long xrp_writeback_alien_mapping(struct xvp_file *xvp_file,
 		if (xrp_copy_user_from_phys(xvp_file->xvp,
 					    alien_mapping->vaddr,
 					    alien_mapping->size,
-					    alien_mapping->paddr))
+					    alien_mapping->paddr,
+					    flags))
 			ret = -EINVAL;
 		break;
 
@@ -944,7 +979,8 @@ static long __xrp_unshare_block(struct file *filp, struct xrp_mapping *mapping,
 	case XRP_MAPPING_ALIEN:
 		if (flags & XRP_FLAG_WRITE)
 			ret = xrp_writeback_alien_mapping(filp->private_data,
-							  &mapping->alien_mapping);
+							  &mapping->alien_mapping,
+							  flags);
 
 		xrp_alien_mapping_destroy(&mapping->alien_mapping);
 		break;
@@ -1443,10 +1479,15 @@ static int xvp_mmap(struct file *filp, struct vm_area_struct *vma)
 						pfn << PAGE_SHIFT,
 						vma->vm_end - vma->vm_start);
 	if (xrp_allocation) {
+		struct xvp *xvp = xvp_file->xvp;
+		pgprot_t prot = vma->vm_page_prot;
+
+		if (!xvp->hw_ops->clean_cache)
+			prot = pgprot_writecombine(prot);
+
 		err = remap_pfn_range(vma, vma->vm_start, pfn,
 				      vma->vm_end - vma->vm_start,
-				      vma->vm_page_prot);
-
+				      prot);
 
 		vma->vm_private_data = xrp_allocation;
 		vma->vm_ops = &xvp_vm_ops;
@@ -1680,17 +1721,27 @@ static int xrp_init_regs_cma(struct platform_device *pdev, struct xvp *xvp)
 	return xrp_init_cma_pool(&xvp->pool, xvp->dev);
 }
 
-static int xrp_init_common(struct platform_device *pdev, struct xvp *xvp,
-			   const struct xrp_hw_ops *hw_ops, void *hw_arg,
-			   int (*xrp_init_regs)(struct platform_device *pdev,
-						struct xvp *xvp))
+static long xrp_init_common(struct platform_device *pdev,
+			    enum xrp_init_flags init_flags,
+			    const struct xrp_hw_ops *hw_ops, void *hw_arg,
+			    int (*xrp_init_regs)(struct platform_device *pdev,
+						 struct xvp *xvp))
 {
-	int ret;
+	long ret;
 	char nodename[sizeof("xvp") + 3 * sizeof(int)];
+	struct xvp *xvp = devm_kzalloc(&pdev->dev, sizeof(*xvp), GFP_KERNEL);
+	int nodeid;
+
+	if (!xvp) {
+		ret = -ENOMEM;
+		goto err;
+	}
 
 	xvp->dev = &pdev->dev;
 	xvp->hw_ops = hw_ops;
 	xvp->hw_arg = hw_arg;
+	if (init_flags & XRP_INIT_USE_HOST_IRQ)
+		xvp->host_irq_mode = true;
 	platform_set_drvdata(pdev, xvp);
 	mutex_init(&xvp->comm_lock);
 	init_completion(&xvp->completion);
@@ -1712,7 +1763,7 @@ static int xrp_init_common(struct platform_device *pdev, struct xvp *xvp,
 		dev_dbg(xvp->dev,
 			"no firmware-name property, not loading firmware");
 	} else if (ret < 0) {
-		dev_err(xvp->dev, "invalid firmware name (%d)", ret);
+		dev_err(xvp->dev, "invalid firmware name (%ld)", ret);
 		goto err_free_map;
 	}
 
@@ -1723,7 +1774,13 @@ static int xrp_init_common(struct platform_device *pdev, struct xvp *xvp,
 			goto err_pm_disable;
 	}
 
-	sprintf(nodename, "xvp%u", xvp_nodeid++);
+	nodeid = ida_simple_get(&xvp_nodeid, 0, 0, GFP_KERNEL);
+	if (nodeid < 0) {
+		ret = nodeid;
+		goto err_pm_disable;
+	}
+	xvp->nodeid = nodeid;
+	sprintf(nodename, "xvp%u", nodeid);
 
 	xvp->miscdev = (struct miscdevice){
 		.minor = MISC_DYNAMIC_MINOR,
@@ -1734,37 +1791,50 @@ static int xrp_init_common(struct platform_device *pdev, struct xvp *xvp,
 
 	ret = misc_register(&xvp->miscdev);
 	if (ret < 0)
-		goto err_pm_disable;
-	return 0;
+		goto err_free_id;
+	return PTR_ERR(xvp);
+err_free_id:
+	ida_simple_remove(&xvp_nodeid, nodeid);
 err_pm_disable:
 	pm_runtime_disable(xvp->dev);
 err_free_map:
 	xrp_free_address_map(&xvp->address_map);
 err_free_pool:
 	xrp_free_pool(xvp->pool);
+	if (xvp->comm_phys && !xvp->pmem) {
+		dma_free_attrs(xvp->dev, PAGE_SIZE, xvp->comm,
+			       phys_to_dma(xvp->dev, xvp->comm_phys), 0);
+	}
 err:
-	dev_err(&pdev->dev, "%s: ret = %d\n", __func__, ret);
+	dev_err(&pdev->dev, "%s: ret = %ld\n", __func__, ret);
 	return ret;
 }
 
-int xrp_init(struct platform_device *pdev, struct xvp *xvp,
-	     const struct xrp_hw_ops *hw_ops, void *hw_arg)
+typedef long xrp_init_function(struct platform_device *pdev,
+			       enum xrp_init_flags flags,
+			       const struct xrp_hw_ops *hw_ops, void *hw_arg);
+
+xrp_init_function xrp_init;
+long xrp_init(struct platform_device *pdev, enum xrp_init_flags flags,
+	      const struct xrp_hw_ops *hw_ops, void *hw_arg)
 {
-	return xrp_init_common(pdev, xvp, hw_ops, hw_arg, xrp_init_regs_v0);
+	return xrp_init_common(pdev, flags, hw_ops, hw_arg, xrp_init_regs_v0);
 }
 EXPORT_SYMBOL(xrp_init);
 
-int xrp_init_v1(struct platform_device *pdev, struct xvp *xvp,
-		const struct xrp_hw_ops *hw_ops, void *hw_arg)
+xrp_init_function xrp_init_v1;
+long xrp_init_v1(struct platform_device *pdev, enum xrp_init_flags flags,
+		 const struct xrp_hw_ops *hw_ops, void *hw_arg)
 {
-	return xrp_init_common(pdev, xvp, hw_ops, hw_arg, xrp_init_regs_v1);
+	return xrp_init_common(pdev, flags, hw_ops, hw_arg, xrp_init_regs_v1);
 }
 EXPORT_SYMBOL(xrp_init_v1);
 
-int xrp_init_cma(struct platform_device *pdev, struct xvp *xvp,
-		 const struct xrp_hw_ops *hw_ops, void *hw_arg)
+xrp_init_function xrp_init_cma;
+long xrp_init_cma(struct platform_device *pdev, enum xrp_init_flags flags,
+		  const struct xrp_hw_ops *hw_ops, void *hw_arg)
 {
-	return xrp_init_common(pdev, xvp, hw_ops, hw_arg, xrp_init_regs_cma);
+	return xrp_init_common(pdev, flags, hw_ops, hw_arg, xrp_init_regs_cma);
 }
 EXPORT_SYMBOL(xrp_init_cma);
 
@@ -1779,8 +1849,12 @@ int xrp_deinit(struct platform_device *pdev)
 	misc_deregister(&xvp->miscdev);
 	release_firmware(xvp->firmware);
 	xrp_free_pool(xvp->pool);
+	if (xvp->comm_phys && !xvp->pmem) {
+		dma_free_attrs(xvp->dev, PAGE_SIZE, xvp->comm,
+			       phys_to_dma(xvp->dev, xvp->comm_phys), 0);
+	}
 	xrp_free_address_map(&xvp->address_map);
-	--xvp_nodeid;
+	ida_simple_remove(&xvp_nodeid, xvp->nodeid);
 	return 0;
 }
 EXPORT_SYMBOL(xrp_deinit);
@@ -1801,15 +1875,10 @@ static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 {
 }
 
-static void invalidate_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-}
-
 static const struct xrp_hw_ops hw_ops = {
 	.get_hw_sync_data = get_hw_sync_data,
 	.clean_cache = clean_cache,
 	.flush_cache = flush_cache,
-	.invalidate_cache = invalidate_cache,
 };
 
 #ifdef CONFIG_OF
@@ -1838,27 +1907,26 @@ MODULE_DEVICE_TABLE(acpi, xrp_acpi_match);
 
 static int xrp_probe(struct platform_device *pdev)
 {
-	int ret = -EINVAL;
-	struct xvp *xvp = devm_kzalloc(&pdev->dev, sizeof(*xvp), GFP_KERNEL);
-	if (!xvp)
-		return -ENOMEM;
+	long ret = -EINVAL;
 
 #ifdef CONFIG_OF
 	{
 		const struct of_device_id *match;
-		int (*init)(struct platform_device *pdev, struct xvp *xvp,
-			    const struct xrp_hw_ops *hw_ops, void *hw_arg);
+		xrp_init_function *init;
 
 	        match = of_match_device(xrp_of_match, &pdev->dev);
 		init = match->data;
-		return init(pdev, xvp, &hw_ops, NULL);
+		ret = init(pdev, 0, &hw_ops, NULL);
+		return IS_ERR_VALUE(ret) ? ret : 0;
 	}
 #endif
 #ifdef CONFIG_ACPI
-	ret = xrp_init_v1(pdev, xvp, &hw_ops, NULL);
-	if (ret == 0) {
+	ret = xrp_init_v1(pdev, 0, &hw_ops, NULL);
+	if (!IS_ERR_VALUE(ret)) {
 		struct xrp_address_map_entry *entry;
+		struct xvp *xvp = ERR_PTR(ret);
 
+		ret = 0;
 		/*
 		 * On ACPI system DSP can currently only access
 		 * its own shared memory.

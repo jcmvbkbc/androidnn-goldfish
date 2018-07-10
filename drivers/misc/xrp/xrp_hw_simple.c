@@ -37,7 +37,6 @@
 #include <asm/cacheflush.h>
 #include "xrp_hw.h"
 #include "xrp_hw_simple_dsp_interface.h"
-#include "xrp_internal.h"
 
 #define DRIVER_NAME "xrp-hw-simple"
 
@@ -52,18 +51,20 @@ enum xrp_irq_mode {
 };
 
 struct xrp_hw_simple {
-	struct xvp xrp;
+	struct xvp *xrp;
 	phys_addr_t regs_phys;
 	void __iomem *regs;
 
 	/* how IRQ is used to notify the device of incoming data */
 	enum xrp_irq_mode device_irq_mode;
 	/*
-	 * offset of IRQ register in MMIO region (host side)
+	 * offset of device IRQ register in MMIO region (device side)
 	 * bit number
 	 * device IRQ#
 	 */
 	u32 device_irq[3];
+	/* offset of devuce IRQ register in MMIO region (host side) */
+	u32 device_irq_host_offset;
 	/* how IRQ is used to notify the host of incoming data */
 	enum xrp_irq_mode host_irq_mode;
 	/*
@@ -125,11 +126,11 @@ static void send_irq(void *hw_arg)
 
 	switch (hw->device_irq_mode) {
 	case XRP_IRQ_EDGE:
-		reg_write32(hw, hw->device_irq[0], 0);
+		reg_write32(hw, hw->device_irq_host_offset, 0);
 		/* fallthrough */
 	case XRP_IRQ_LEVEL:
 		wmb();
-		reg_write32(hw, hw->device_irq[0],
+		reg_write32(hw, hw->device_irq_host_offset,
 			    BIT(hw->device_irq[1]));
 		break;
 	default:
@@ -148,7 +149,7 @@ static void ack_irq(void *hw_arg)
 static irqreturn_t irq_handler(int irq, void *dev_id)
 {
 	struct xrp_hw_simple *hw = dev_id;
-	irqreturn_t ret = xrp_irq_handler(irq, &hw->xrp);
+	irqreturn_t ret = xrp_irq_handler(irq, hw->xrp);
 
 	if (ret == IRQ_HANDLED)
 		ack_irq(hw);
@@ -167,11 +168,6 @@ static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 	__flush_dcache_range((unsigned long)vaddr, sz);
 	__invalidate_dcache_range((unsigned long)vaddr, sz);
 }
-
-static void invalidate_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-	__invalidate_dcache_range((unsigned long)vaddr, sz);
-}
 #elif defined(__arm__)
 static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 {
@@ -184,12 +180,6 @@ static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 	__cpuc_flush_dcache_area(vaddr, sz);
 	outer_flush_range(paddr, paddr + sz);
 }
-
-static void invalidate_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-	__cpuc_flush_dcache_area(vaddr, sz);
-	outer_inv_range(paddr, paddr + sz);
-}
 #else
 #warning "cache operations are not implemented for this architecture"
 static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
@@ -197,10 +187,6 @@ static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 }
 
 static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-}
-
-static void invalidate_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 {
 }
 #endif
@@ -216,15 +202,14 @@ static const struct xrp_hw_ops hw_ops = {
 
 	.clean_cache = clean_cache,
 	.flush_cache = flush_cache,
-	.invalidate_cache = invalidate_cache,
 };
 
-static int init_hw(struct platform_device *pdev, struct xrp_hw_simple *hw,
-		   int mem_idx)
+static long init_hw(struct platform_device *pdev, struct xrp_hw_simple *hw,
+		    int mem_idx, enum xrp_init_flags *init_flags)
 {
 	struct resource *mem;
 	int irq;
-	int ret;
+	long ret;
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, mem_idx);
 	if (!mem) {
@@ -241,6 +226,19 @@ static int init_hw(struct platform_device *pdev, struct xrp_hw_simple *hw,
 					 hw->device_irq,
 					 ARRAY_SIZE(hw->device_irq));
 	if (ret == 0) {
+		u32 device_irq_host_offset;
+
+		ret = of_property_read_u32(pdev->dev.of_node,
+					   "device-irq-host-offset",
+					   &device_irq_host_offset);
+		if (ret == 0) {
+			hw->device_irq_host_offset = device_irq_host_offset;
+		} else {
+			hw->device_irq_host_offset = hw->device_irq[0];
+			ret = 0;
+		}
+	}
+	if (ret == 0) {
 		u32 device_irq_mode;
 
 		ret = of_property_read_u32(pdev->dev.of_node,
@@ -253,8 +251,9 @@ static int init_hw(struct platform_device *pdev, struct xrp_hw_simple *hw,
 	}
 	if (ret == 0) {
 		dev_dbg(&pdev->dev,
-			"%s: device IRQ MMIO offset = 0x%08x, bit = %d, device IRQ = %d, IRQ mode = %d",
-			__func__, hw->device_irq[0], hw->device_irq[1],
+			"%s: device IRQ MMIO host offset = 0x%08x, offset = 0x%08x, bit = %d, device IRQ = %d, IRQ mode = %d",
+			__func__, hw->device_irq_host_offset,
+			hw->device_irq[0], hw->device_irq[1],
 			hw->device_irq[2], hw->device_irq_mode);
 	} else {
 		dev_info(&pdev->dev,
@@ -275,8 +274,13 @@ static int init_hw(struct platform_device *pdev, struct xrp_hw_simple *hw,
 		else
 			ret = -ENOENT;
 	}
-	irq = platform_get_irq(pdev, 0);
-	if (irq >= 0 && ret == 0) {
+
+	if (ret == 0 && hw->host_irq_mode != XRP_IRQ_NONE)
+		irq = platform_get_irq(pdev, 0);
+	else
+		irq = -1;
+
+	if (irq >= 0) {
 		dev_dbg(&pdev->dev, "%s: host IRQ = %d, ",
 			__func__, irq);
 		ret = devm_request_irq(&pdev->dev, irq, irq_handler,
@@ -285,7 +289,7 @@ static int init_hw(struct platform_device *pdev, struct xrp_hw_simple *hw,
 			dev_err(&pdev->dev, "request_irq %d failed\n", irq);
 			goto err;
 		}
-		hw->xrp.host_irq_mode = true;
+		*init_flags |= XRP_INIT_USE_HOST_IRQ;
 	} else {
 		dev_info(&pdev->dev, "using polling mode on the host side\n");
 	}
@@ -294,37 +298,40 @@ err:
 	return ret;
 }
 
-static int init(struct platform_device *pdev, struct xrp_hw_simple *hw)
+static long init(struct platform_device *pdev, struct xrp_hw_simple *hw)
 {
-	int ret;
+	long ret;
+	enum xrp_init_flags init_flags = 0;
 
-	ret = init_hw(pdev, hw, 0);
+	ret = init_hw(pdev, hw, 0, &init_flags);
 	if (ret < 0)
 		return ret;
 
-	return xrp_init(pdev, &hw->xrp, &hw_ops, hw);
+	return xrp_init(pdev, init_flags, &hw_ops, hw);
 }
 
-static int init_v1(struct platform_device *pdev, struct xrp_hw_simple *hw)
+static long init_v1(struct platform_device *pdev, struct xrp_hw_simple *hw)
 {
-	int ret;
+	long ret;
+	enum xrp_init_flags init_flags = 0;
 
-	ret = init_hw(pdev, hw, 1);
+	ret = init_hw(pdev, hw, 1, &init_flags);
 	if (ret < 0)
 		return ret;
 
-	return xrp_init_v1(pdev, &hw->xrp, &hw_ops, hw);
+	return xrp_init_v1(pdev, init_flags, &hw_ops, hw);
 }
 
-static int init_cma(struct platform_device *pdev, struct xrp_hw_simple *hw)
+static long init_cma(struct platform_device *pdev, struct xrp_hw_simple *hw)
 {
-	int ret;
+	long ret;
+	enum xrp_init_flags init_flags = 0;
 
-	ret = init_hw(pdev, hw, 0);
+	ret = init_hw(pdev, hw, 0, &init_flags);
 	if (ret < 0)
 		return ret;
 
-	return xrp_init_cma(pdev, &hw->xrp, &hw_ops, hw);
+	return xrp_init_cma(pdev, init_flags, &hw_ops, hw);
 }
 
 #ifdef CONFIG_OF
@@ -348,7 +355,8 @@ static int xrp_hw_simple_probe(struct platform_device *pdev)
 	struct xrp_hw_simple *hw =
 		devm_kzalloc(&pdev->dev, sizeof(*hw), GFP_KERNEL);
 	const struct of_device_id *match;
-	int (*init)(struct platform_device *pdev, struct xrp_hw_simple *hw);
+	long (*init)(struct platform_device *pdev, struct xrp_hw_simple *hw);
+	long ret;
 
 	if (!hw)
 		return -ENOMEM;
@@ -359,7 +367,14 @@ static int xrp_hw_simple_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	init = match->data;
-	return init(pdev, hw);
+	ret = init(pdev, hw);
+	if (IS_ERR_VALUE(ret)) {
+		xrp_deinit(pdev);
+		return ret;
+	} else {
+		hw->xrp = ERR_PTR(ret);
+		return 0;
+	}
 
 }
 
