@@ -212,6 +212,7 @@
 
 	hifidsp {
 		compatible = "hisilicon,k3hifidsp";
+		status = "disabled";
 	};
 
 	xrp@0 {
