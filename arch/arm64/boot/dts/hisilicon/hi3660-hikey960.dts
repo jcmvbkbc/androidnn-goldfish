@@ -214,6 +214,17 @@
 		compatible = "hisilicon,k3hifidsp";
 	};
 
+	xrp@0 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "cdns,xrp,v1";
+		reg = <0x00000000 0xf0000000 0x00000000 0x01000000>;
+		firmware-name = "xrp0.elf";
+		ranges;
+		dsp@0 {
+		};
+	};
+
 	keys {
 		compatible = "gpio-keys";
 		pinctrl-names = "default";
