@@ -215,12 +215,17 @@
 	};
 
 	xrp@0 {
-		#address-cells = <2>;
-		#size-cells = <2>;
+		#address-cells = <1>;
+		#size-cells = <1>;
 		compatible = "cdns,xrp,v1";
-		reg = <0x00000000 0xf0000000 0x00000000 0x01000000>;
+		reg = <0x0 0x8b300000 0x0 0x00380000>;
 		firmware-name = "xrp0.elf";
-		ranges;
+		ranges = <
+			  0x8b300000  0x0 0x8b300000  0x00380000
+			  0xc0000000  0x0 0x89200000  0x00600000
+			  0xe8000000  0x0 0x89800000  0x00030000
+			  0xe8058000  0x0 0x89830000  0x00031000
+			>;
 		dsp@0 {
 		};
 	};
