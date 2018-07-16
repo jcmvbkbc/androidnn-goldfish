@@ -182,9 +182,10 @@
 			no-map;
 		};
 
-		hifi-data {
+		hifi_data: hifi-data {
 			reg = <0x0 0x8B300000 0x0 0x380000>;
-			no-map;
+			compatible = "shared-dma-pool";
+			reusable;
 		};
 	};
 
@@ -218,8 +219,9 @@
 	xrp@0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
-		compatible = "cdns,xrp,v1";
+		compatible = "cdns,xrp-hw-hikey,cma";
 		reg = <0x0 0x8b300000 0x0 0x00380000>;
+		memory-region = <&hifi_data>;
 		firmware-name = "xrp0.elf";
 		ranges = <
 			  0x8b300000  0x0 0x8b300000  0x00380000
