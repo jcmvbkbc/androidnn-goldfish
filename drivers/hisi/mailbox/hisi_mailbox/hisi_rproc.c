@@ -154,6 +154,8 @@ int hisi_rproc_xfer_async(rproc_id_t rproc_id, rproc_msg_t *msg, rproc_msg_len_t
 
 	int ret = 0;
 
+	pr_err("%s: rproc_id = 0x%08x, len = %d, msg = %*ph\n",
+	       __func__, rproc_id, len, len, msg);
 	if (WARN_ON(!IS_READY())) {
 		ret = -EINVAL;
 		goto out;
@@ -199,6 +201,8 @@ int hisi_rproc_xfer_sync(rproc_id_t rproc_id, rproc_msg_t *msg, rproc_msg_len_t 
 	mbox_ack_type_t ack_type = MANUAL_ACK;
 	int ret = 0;
 
+	pr_err("%s: rproc_id = 0x%08x, len = %d, msg = %*ph\n",
+	       __func__, rproc_id, len, len, msg);
 	if (WARN_ON(!IS_READY())) {
 		ret = -EINVAL;
 		goto out;
