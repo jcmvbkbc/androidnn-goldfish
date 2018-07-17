@@ -1,7 +1,7 @@
 /*
  * xrp_hw_hikey: Simple xtensa/arm low-level XRP driver
  *
- * Copyright (c) 2017 Cadence Design Systems, Inc.
+ * Copyright (c) 2018 Cadence Design Systems, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -302,6 +302,10 @@ err:
 	return ret;
 }
 
+typedef long init_function(struct platform_device *pdev,
+			   struct xrp_hw_hikey *hw);
+
+static init_function init;
 static long init(struct platform_device *pdev, struct xrp_hw_hikey *hw)
 {
 	long ret;
@@ -314,6 +318,7 @@ static long init(struct platform_device *pdev, struct xrp_hw_hikey *hw)
 	return xrp_init(pdev, init_flags, &hw_ops, hw);
 }
 
+static init_function init_v1;
 static long init_v1(struct platform_device *pdev, struct xrp_hw_hikey *hw)
 {
 	long ret;
@@ -326,6 +331,7 @@ static long init_v1(struct platform_device *pdev, struct xrp_hw_hikey *hw)
 	return xrp_init_v1(pdev, init_flags, &hw_ops, hw);
 }
 
+static init_function init_cma;
 static long init_cma(struct platform_device *pdev, struct xrp_hw_hikey *hw)
 {
 	long ret;
@@ -359,7 +365,7 @@ static int xrp_hw_hikey_probe(struct platform_device *pdev)
 	struct xrp_hw_hikey *hw =
 		devm_kzalloc(&pdev->dev, sizeof(*hw), GFP_KERNEL);
 	const struct of_device_id *match;
-	long (*init)(struct platform_device *pdev, struct xrp_hw_hikey *hw);
+	init_function *init;
 	long ret;
 
 	if (!hw)
