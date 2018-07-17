@@ -38,8 +38,7 @@
 #include "xrp_hw.h"
 #include "xrp_hw_simple_dsp_interface.h"
 
-#include "ipcm/bsp_drv_ipc.h"
-#include "mailbox/drv_mailbox_msg.h"
+#include <linux/hisi/hisi_rproc.h>
 
 #define DRIVER_NAME "xrp-hw-hikey"
 
@@ -55,6 +54,8 @@ enum xrp_irq_mode {
 
 struct xrp_hw_hikey {
 	struct xvp *xrp;
+	struct device *dev;
+
 	phys_addr_t regs_phys;
 	void __iomem *regs;
 
@@ -106,6 +107,35 @@ static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 	return hw_sync_data;
 }
 
+static int send_cmd_async(struct xrp_hw_hikey *hw, uint32_t cmd)
+{
+	uint32_t omsg = cmd;
+	int ret = RPROC_ASYNC_SEND(HISI_RPROC_LPM3_MBX17,
+				   &omsg, sizeof(omsg));
+	if (ret != 0) {
+		dev_err(hw->dev, "%s: RPROC_ASYNC_SEND ret = %d\n",
+			__func__, ret);
+	}
+	return ret;
+}
+
+static int send_cmd_sync(struct xrp_hw_hikey *hw, uint32_t cmd)
+{
+	uint32_t omsg = cmd;
+	uint32_t imsg = 0;
+	int ret = RPROC_SYNC_SEND(HISI_RPROC_LPM3_MBX17,
+				   &omsg, sizeof(omsg),
+				   &imsg, sizeof(imsg));
+	if (ret != 0) {
+		dev_err(hw->dev, "%s: RPROC_SYNC_SEND ret = %d\n",
+			__func__, ret);
+	} else {
+		dev_dbg(hw->dev, "%s: sent: %08x, recvd: %08x\n",
+			__func__, omsg, imsg);
+	}
+	return ret;
+}
+
 static int enable(void *hw_arg)
 {
 	return 0;
@@ -117,19 +147,18 @@ static void disable(void *hw_arg)
 
 static void reset(void *hw_arg)
 {
-	reg_write32(hw_arg, XRP_REG_RESET, 1);
-	udelay(1);
-	reg_write32(hw_arg, XRP_REG_RESET, 0);
 }
 
 static void halt(void *hw_arg)
 {
-	reg_write32(hw_arg, XRP_REG_RUNSTALL, 1);
+	send_cmd_async(hw_arg, (0 << 24) | (16 << 16) | (3 << 8) | (1 << 0));
+	udelay(100);
 }
 
 static void release(void *hw_arg)
 {
-	reg_write32(hw_arg, XRP_REG_RUNSTALL, 0);
+	send_cmd_async(hw_arg, (0 << 24) | (16 << 16) | (3 << 8) | (0 << 0));
+	udelay(100);
 }
 
 static void send_irq(void *hw_arg)
@@ -196,34 +225,8 @@ static const struct xrp_hw_ops hw_ops = {
 static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
 		    int mem_idx, enum xrp_init_flags *init_flags)
 {
-	//struct resource *mem;
 	int irq;
 	long ret;
-
-	ret = DRV_IPCIntInit();
-	if (OK != ret) {
-		dev_err(&pdev->dev, "DRV_IPCIntInit failed\n");
-		ret = -ENODEV;
-		goto err;
-	}
-	ret = (int)mailbox_init();
-	if (OK != ret) {
-		dev_err(&pdev->dev, "mailbox_init failed\n");
-		ret = -ENODEV;
-		goto err;
-	}
-
-#if 0
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, mem_idx);
-	if (!mem) {
-		ret = -ENODEV;
-		goto err;
-	}
-	hw->regs_phys = mem->start;
-	hw->regs = devm_ioremap_resource(&pdev->dev, mem);
-	pr_debug("%s: regs = %pap/%p\n",
-		 __func__, &mem->start, hw->regs);
-#endif
 
 	ret = of_property_read_u32_array(pdev->dev.of_node,
 					 "device-irq",
@@ -376,6 +379,7 @@ static int xrp_hw_hikey_probe(struct platform_device *pdev)
 	if (!match)
 		return -ENODEV;
 
+	hw->dev = &pdev->dev;
 	init = match->data;
 	ret = init(pdev, hw);
 	if (IS_ERR_VALUE(ret)) {
