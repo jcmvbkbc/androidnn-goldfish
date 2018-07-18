@@ -206,6 +206,33 @@ static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 {
 }
 
+static void panic_check(void *hw_arg)
+{
+	struct xrp_hw_hikey *hw = hw_arg;
+	phys_addr_t p = 0x8b300000;
+	char *buf;
+	void __iomem *v = ioremap(p, PAGE_SIZE);
+	uint32_t panic;
+	uint32_t size;
+
+	memcpy_fromio(&panic, v + 0x100, sizeof(panic));
+	if (panic != 0xdeadbabe)
+		return;
+	memcpy_fromio(&size, v + 0x104, sizeof(size));
+	dev_err(hw->dev, "%s: panic dump %d bytes:\n", __func__, size);
+	if (size > PAGE_SIZE)
+		size = PAGE_SIZE;
+	buf = kzalloc(size, GFP_KERNEL);
+	if (buf) {
+		memcpy_fromio(buf, v + 0x108, size);
+		dev_err(hw->dev, "<<<\n%*s\n>>>\n", size, buf);
+		kfree(buf);
+	} else {
+		dev_err(hw->dev,
+			"couldn't allocate memory to read the dump\n");
+	}
+}
+
 static const struct xrp_hw_ops hw_ops = {
 	.enable = enable,
 	.disable = disable,
@@ -219,6 +246,8 @@ static const struct xrp_hw_ops hw_ops = {
 
 	.clean_cache = clean_cache,
 	.flush_cache = flush_cache,
+
+	.panic_check = panic_check,
 };
 
 static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,

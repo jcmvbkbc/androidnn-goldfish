@@ -321,6 +321,8 @@ static int xrp_synchronize(struct xvp *xvp)
 	}
 	ret = 0;
 err:
+	if (ret && xvp->hw_ops->panic_check)
+		xvp->hw_ops->panic_check(xvp->hw_arg);
 	kfree(hw_sync_data);
 	xrp_comm_write32(&shared_sync->sync, XRP_DSP_SYNC_IDLE);
 	return ret;
