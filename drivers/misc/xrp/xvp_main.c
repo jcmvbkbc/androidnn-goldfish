@@ -261,6 +261,7 @@ static int xrp_synchronize(struct xvp *xvp)
 	struct xrp_dsp_sync __iomem *shared_sync = xvp->comm;
 	int ret;
 	u32 v;
+	u32 pr = 0;
 
 	hw_sync_data = xvp->hw_ops->get_hw_sync_data(xvp->hw_arg, &sz);
 	if (!hw_sync_data) {
@@ -271,9 +272,16 @@ static int xrp_synchronize(struct xvp *xvp)
 	xrp_comm_write32(&shared_sync->sync, XRP_DSP_SYNC_START);
 	mb();
 	do {
+		u32 v1 = xrp_comm_read32(xvp->comm + 0x100);
+
 		v = xrp_comm_read32(&shared_sync->sync);
 		if (v == XRP_DSP_SYNC_DSP_READY)
 			break;
+		if (v1 != pr) {
+			dev_err_ratelimited(xvp->dev, "%s: [%p]: %08x\n",
+					    __func__, xvp->comm + 0x100, v1);
+			pr = v1;
+		}
 		schedule();
 	} while (time_before(jiffies, deadline));
 
