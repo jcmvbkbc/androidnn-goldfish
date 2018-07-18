@@ -110,7 +110,7 @@ static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 static int send_cmd_async(struct xrp_hw_hikey *hw, uint32_t cmd)
 {
 	uint32_t omsg = cmd;
-	int ret = RPROC_ASYNC_SEND(HISI_RPROC_LPM3_MBX17,
+	int ret = RPROC_ASYNC_SEND(HISI_RPROC_HIFI_MBX18,
 				   &omsg, sizeof(omsg));
 	if (ret != 0) {
 		dev_err(hw->dev, "%s: RPROC_ASYNC_SEND ret = %d\n",
@@ -151,13 +151,12 @@ static void reset(void *hw_arg)
 
 static void halt(void *hw_arg)
 {
-	send_cmd_async(hw_arg, (0 << 24) | (16 << 16) | (3 << 8) | (1 << 0));
 	udelay(100);
 }
 
 static void release(void *hw_arg)
 {
-	send_cmd_async(hw_arg, (0 << 24) | (16 << 16) | (3 << 8) | (0 << 0));
+	send_cmd_async(hw_arg, 0);
 	udelay(100);
 }
 
