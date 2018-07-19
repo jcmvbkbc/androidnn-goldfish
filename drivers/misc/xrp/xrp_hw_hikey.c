@@ -107,31 +107,14 @@ static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 	return hw_sync_data;
 }
 
-static int send_cmd_async(struct xrp_hw_hikey *hw, uint32_t cmd)
+static int send_cmd_async(struct xrp_hw_hikey *hw, uint32_t mbx, uint32_t cmd)
 {
 	uint32_t omsg = cmd;
-	int ret = RPROC_ASYNC_SEND(HISI_RPROC_HIFI_MBX18,
+	int ret = RPROC_ASYNC_SEND(mbx,
 				   &omsg, sizeof(omsg));
 	if (ret != 0) {
 		dev_err(hw->dev, "%s: RPROC_ASYNC_SEND ret = %d\n",
 			__func__, ret);
-	}
-	return ret;
-}
-
-static int send_cmd_sync(struct xrp_hw_hikey *hw, uint32_t cmd)
-{
-	uint32_t omsg = cmd;
-	uint32_t imsg = 0;
-	int ret = RPROC_SYNC_SEND(HISI_RPROC_LPM3_MBX17,
-				   &omsg, sizeof(omsg),
-				   &imsg, sizeof(imsg));
-	if (ret != 0) {
-		dev_err(hw->dev, "%s: RPROC_SYNC_SEND ret = %d\n",
-			__func__, ret);
-	} else {
-		dev_dbg(hw->dev, "%s: sent: %08x, recvd: %08x\n",
-			__func__, omsg, imsg);
 	}
 	return ret;
 }
@@ -151,12 +134,14 @@ static void reset(void *hw_arg)
 
 static void halt(void *hw_arg)
 {
+	send_cmd_async(hw_arg, HISI_RPROC_LPM3_MBX17,
+		       (16 << 16) | (3 << 8) | (1 << 0));
 	udelay(100);
 }
 
 static void release(void *hw_arg)
 {
-	send_cmd_async(hw_arg, 0);
+	send_cmd_async(hw_arg, HISI_RPROC_HIFI_MBX18, 0);
 	udelay(100);
 }
 
