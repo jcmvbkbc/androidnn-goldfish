@@ -206,6 +206,14 @@ static inline void xrp_send_device_irq(struct xvp *xvp)
 		xvp->hw_ops->send_irq(xvp->hw_arg);
 }
 
+static inline bool xrp_panic_check(struct xvp *xvp)
+{
+	if (xvp->hw_ops->panic_check)
+		return xvp->hw_ops->panic_check(xvp->hw_arg);
+	else
+		return false;
+}
+
 static void xrp_add_known_file(struct file *filp)
 {
 	struct xrp_known_file *p = kmalloc(sizeof(*p), GFP_KERNEL);
@@ -261,7 +269,6 @@ static int xrp_synchronize(struct xvp *xvp)
 	struct xrp_dsp_sync __iomem *shared_sync = xvp->comm;
 	int ret;
 	u32 v;
-	u32 pr = 0;
 
 	hw_sync_data = xvp->hw_ops->get_hw_sync_data(xvp->hw_arg, &sz);
 	if (!hw_sync_data) {
@@ -272,16 +279,11 @@ static int xrp_synchronize(struct xvp *xvp)
 	xrp_comm_write32(&shared_sync->sync, XRP_DSP_SYNC_START);
 	mb();
 	do {
-		u32 v1 = xrp_comm_read32(xvp->comm + 0x100);
-
 		v = xrp_comm_read32(&shared_sync->sync);
 		if (v == XRP_DSP_SYNC_DSP_READY)
 			break;
-		if (v1 != pr) {
-			dev_err_ratelimited(xvp->dev, "%s: [%p]: %08x\n",
-					    __func__, xvp->comm + 0x100, v1);
-			pr = v1;
-		}
+		if (xrp_panic_check(xvp))
+			goto err;
 		schedule();
 	} while (time_before(jiffies, deadline));
 
@@ -299,6 +301,8 @@ static int xrp_synchronize(struct xvp *xvp)
 		v = xrp_comm_read32(&shared_sync->sync);
 		if (v == XRP_DSP_SYNC_DSP_TO_HOST)
 			break;
+		if (xrp_panic_check(xvp))
+			goto err;
 		schedule();
 	} while (time_before(jiffies, deadline));
 
@@ -313,6 +317,8 @@ static int xrp_synchronize(struct xvp *xvp)
 	if (xvp->host_irq_mode) {
 		int res = wait_for_completion_timeout(&xvp->completion,
 						      firmware_command_timeout * HZ);
+		if (xrp_panic_check(xvp))
+			goto err;
 		if (res == 0) {
 			dev_err(xvp->dev,
 				"host IRQ mode is requested, but DSP couldn't deliver IRQ during synchronization\n");
@@ -321,16 +327,13 @@ static int xrp_synchronize(struct xvp *xvp)
 	}
 	ret = 0;
 err:
-	if (ret && xvp->hw_ops->panic_check)
-		xvp->hw_ops->panic_check(xvp->hw_arg);
 	kfree(hw_sync_data);
 	xrp_comm_write32(&shared_sync->sync, XRP_DSP_SYNC_IDLE);
 	return ret;
 }
 
-static bool xrp_cmd_complete(void *p)
+static bool xrp_cmd_complete(struct xvp *xvp)
 {
-	struct xvp *xvp = p;
 	struct xrp_dsp_cmd __iomem *cmd = xvp->comm;
 	u32 flags = xrp_comm_read32(&cmd->flags);
 
@@ -1044,17 +1047,19 @@ static long xrp_ioctl_free(struct file *filp,
 	return -EINVAL;
 }
 
-static long xvp_complete_cmd_irq(struct completion *completion,
-				 bool (*cmd_complete)(void *p),
-				 void *p)
+static long xvp_complete_cmd_irq(struct xvp *xvp,
+				 struct completion *completion,
+				 bool (*cmd_complete)(struct xvp *p))
 {
 	long timeout = firmware_command_timeout * HZ;
 
 	do {
 		timeout = wait_for_completion_interruptible_timeout(completion,
 								    timeout);
-		if (cmd_complete(p))
+		if (cmd_complete(xvp))
 			return 0;
+		if (xrp_panic_check(xvp))
+			return -EBUSY;
 	} while (timeout > 0);
 
 	if (timeout == 0)
@@ -1062,14 +1067,16 @@ static long xvp_complete_cmd_irq(struct completion *completion,
 	return timeout;
 }
 
-static long xvp_complete_cmd_poll(bool (*cmd_complete)(void *p),
-				  void *p)
+static long xvp_complete_cmd_poll(struct xvp *xvp,
+				  bool (*cmd_complete)(struct xvp *p))
 {
 	unsigned long deadline = jiffies + firmware_command_timeout * HZ;
 
 	do {
-		if (cmd_complete(p))
+		if (cmd_complete(xvp))
 			return 0;
+		if (xrp_panic_check(xvp))
+			return -EBUSY;
 		schedule();
 	} while (time_before(jiffies, deadline));
 
@@ -1389,12 +1396,12 @@ static long xrp_ioctl_submit_sync(struct file *filp,
 			xrp_send_device_irq(xvp);
 
 			if (xvp->host_irq_mode) {
-				ret = xvp_complete_cmd_irq(&xvp->completion,
-							   xrp_cmd_complete,
-							   xvp);
+				ret = xvp_complete_cmd_irq(xvp,
+							   &xvp->completion,
+							   xrp_cmd_complete);
 			} else {
-				ret = xvp_complete_cmd_poll(xrp_cmd_complete,
-							    xvp);
+				ret = xvp_complete_cmd_poll(xvp,
+							    xrp_cmd_complete);
 			}
 
 			/* copy back inline data */

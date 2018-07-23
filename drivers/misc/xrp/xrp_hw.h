@@ -60,7 +60,8 @@ struct xrp_hw_ops {
 	/* memset device-specific memory */
 	void (*memset_hw)(void __iomem *dst, int c, size_t sz);
 
-	void (*panic_check)(void *hw_arg);
+	/* check DSP status */
+	bool (*panic_check)(void *hw_arg);
 };
 
 enum xrp_init_flags {
