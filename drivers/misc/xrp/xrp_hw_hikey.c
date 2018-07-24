@@ -183,13 +183,6 @@ static irqreturn_t irq_handler(int irq, void *dev_id)
 }
 
 #warning "cache operations are not implemented for this architecture"
-static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-}
-
-static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-}
 
 static void panic_check(void *hw_arg)
 {
@@ -228,9 +221,6 @@ static const struct xrp_hw_ops hw_ops = {
 	.get_hw_sync_data = get_hw_sync_data,
 
 	.send_irq = send_irq,
-
-	.clean_cache = clean_cache,
-	.flush_cache = flush_cache,
 
 	.panic_check = panic_check,
 };
