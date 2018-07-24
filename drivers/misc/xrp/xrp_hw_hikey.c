@@ -52,11 +52,20 @@ enum xrp_irq_mode {
 	XRP_IRQ_MAX,
 };
 
+struct ring_buffer {
+	uint32_t panic;
+	uint32_t read;
+	uint32_t write;
+	uint32_t size;
+	char data[0];
+};
+
 struct xrp_hw_hikey {
 	struct xvp *xrp;
 	struct device *dev;
 
 	phys_addr_t regs_phys;
+	struct ring_buffer __iomem *log_rb;
 	void __iomem *regs;
 
 	/* how IRQ is used to notify the device of incoming data */
@@ -184,31 +193,64 @@ static irqreturn_t irq_handler(int irq, void *dev_id)
 
 #warning "cache operations are not implemented for this architecture"
 
-static void panic_check(void *hw_arg)
+static bool panic_check(void *hw_arg)
 {
 	struct xrp_hw_hikey *hw = hw_arg;
-	phys_addr_t p = 0x8b300000;
-	char *buf;
-	void __iomem *v = ioremap(p, PAGE_SIZE);
 	uint32_t panic;
+	uint32_t read;
+	uint32_t write;
 	uint32_t size;
 
-	memcpy_fromio(&panic, v + 0x100, sizeof(panic));
-	if (panic != 0xdeadbabe)
-		return;
-	memcpy_fromio(&size, v + 0x104, sizeof(size));
-	dev_err(hw->dev, "%s: panic dump %d bytes:\n", __func__, size);
-	if (size > PAGE_SIZE)
-		size = PAGE_SIZE;
-	buf = kzalloc(size, GFP_KERNEL);
-	if (buf) {
-		memcpy_fromio(buf, v + 0x108, size);
-		dev_err(hw->dev, "<<<\n%*s\n>>>\n", size, buf);
-		kfree(buf);
-	} else {
-		dev_err(hw->dev,
-			"couldn't allocate memory to read the dump\n");
+	if (!hw->log_rb)
+		return false;
+
+	panic = __raw_readl(&hw->log_rb->panic);
+	read = __raw_readl(&hw->log_rb->read);
+	write = __raw_readl(&hw->log_rb->write);
+	size = __raw_readl(&hw->log_rb->size);
+
+	if (write < size && read < size) {
+		uint32_t tail;
+		uint32_t total;
+		char *buf = NULL;
+
+		if (read < write) {
+			tail = write - read;
+			total = tail;
+		} else if (read == write) {
+			tail = 0;
+			total = 0;
+		} else {
+			tail = size - read;
+			total = write + tail;
+		}
+
+		if (total)
+			buf = kmalloc(total, GFP_KERNEL);
+
+		if (buf) {
+			uint32_t off = 0;
+			while (off != total) {
+				memcpy_fromio(buf + off,
+					      hw->log_rb->data + read,
+					      tail);
+				read = 0;
+				off += tail;
+				tail = total - tail;
+			}
+			__raw_writel(write, &hw->log_rb->read);
+			dev_info(hw->dev, "<<<\n%.*s\n>>>\n", total, buf);
+			kfree(buf);
+		} else if (total) {
+			dev_err(hw->dev,
+				"%s: couldn't allocate memory (%d) to read the dump\n",
+				__func__, total);
+		}
 	}
+	if (panic == 0xdeadbabe)
+		dev_err(hw->dev, "%s: panic detected\n", __func__);
+
+	return panic == 0xdeadbabe;
 }
 
 static const struct xrp_hw_ops hw_ops = {
@@ -228,8 +270,24 @@ static const struct xrp_hw_ops hw_ops = {
 static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
 		    int mem_idx, enum xrp_init_flags *init_flags)
 {
+	struct resource *mem;
 	int irq;
 	long ret;
+
+	mem = platform_get_resource(pdev, IORESOURCE_MEM, mem_idx);
+	if (mem) {
+		hw->log_rb = devm_ioremap_resource(&pdev->dev, mem);
+		if (IS_ERR(hw->log_rb)) {
+			dev_dbg(&pdev->dev,
+				"%s: couldn't ioremap abort/log region: %ld\n",
+				__func__, PTR_ERR(hw->log_rb));
+			hw->log_rb = NULL;
+		} else {
+			dev_dbg(&pdev->dev,
+				"%s: log ring buffer = %pap, mapped at %p\n",
+				__func__, &mem->start, hw->log_rb);
+		}
+	}
 
 	ret = of_property_read_u32_array(pdev->dev.of_node,
 					 "device-irq",
