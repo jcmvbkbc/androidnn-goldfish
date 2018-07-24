@@ -219,7 +219,10 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 		compatible = "cdns,xrp-hw-hikey,v1";
-		reg = <0x0 0x8b300000 0x0 0x00380000>;
+		reg = <
+		       0x0 0x8b301000 0x0 0x0037f000 /* Shared memory */
+		       0x0 0x8b300000 0x0 0x00001000 /* Panic/log page */
+		      >;
 		firmware-name = "xrp0.elf";
 		ranges = <
 			  0x8b300000  0x0 0x8b300000  0x00380000
