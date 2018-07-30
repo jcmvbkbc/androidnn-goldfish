@@ -70,12 +70,8 @@ struct xrp_hw_hikey {
 
 	/* how IRQ is used to notify the device of incoming data */
 	enum xrp_irq_mode device_irq_mode;
-	/*
-	 * offset of device IRQ register in MMIO region (device side)
-	 * bit number
-	 * device IRQ#
-	 */
-	u32 device_irq[3];
+	/* device IRQ# */
+	u32 device_irq;
 	/* offset of devuce IRQ register in MMIO region (host side) */
 	u32 device_irq_host_offset;
 	/* how IRQ is used to notify the host of incoming data */
@@ -108,9 +104,7 @@ static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 		.host_irq_offset = hw->host_irq[0],
 		.host_irq_bit = hw->host_irq[1],
 		.device_irq_mode = hw->device_irq_mode,
-		.device_irq_offset = hw->device_irq[0],
-		.device_irq_bit = hw->device_irq[1],
-		.device_irq = hw->device_irq[2],
+		.device_irq = hw->device_irq,
 	};
 	*sz = sizeof(*hw_sync_data);
 	return hw_sync_data;
@@ -160,12 +154,8 @@ static void send_irq(void *hw_arg)
 
 	switch (hw->device_irq_mode) {
 	case XRP_IRQ_EDGE:
-		reg_write32(hw, hw->device_irq_host_offset, 0);
-		/* fallthrough */
 	case XRP_IRQ_LEVEL:
-		wmb();
-		reg_write32(hw, hw->device_irq_host_offset,
-			    BIT(hw->device_irq[1]));
+		send_cmd_async(hw_arg, HISI_RPROC_HIFI_MBX18, 0);
 		break;
 	default:
 		break;
@@ -289,40 +279,14 @@ static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
 		}
 	}
 
-	ret = of_property_read_u32_array(pdev->dev.of_node,
-					 "device-irq",
-					 hw->device_irq,
-					 ARRAY_SIZE(hw->device_irq));
+	ret = of_property_read_u32(pdev->dev.of_node,
+				   "device-irq",
+				   &hw->device_irq);
 	if (ret == 0) {
-		u32 device_irq_host_offset;
-
-		ret = of_property_read_u32(pdev->dev.of_node,
-					   "device-irq-host-offset",
-					   &device_irq_host_offset);
-		if (ret == 0) {
-			hw->device_irq_host_offset = device_irq_host_offset;
-		} else {
-			hw->device_irq_host_offset = hw->device_irq[0];
-			ret = 0;
-		}
-	}
-	if (ret == 0) {
-		u32 device_irq_mode;
-
-		ret = of_property_read_u32(pdev->dev.of_node,
-					   "device-irq-mode",
-					   &device_irq_mode);
-		if (device_irq_mode < XRP_IRQ_MAX)
-			hw->device_irq_mode = device_irq_mode;
-		else
-			ret = -ENOENT;
-	}
-	if (ret == 0) {
+		hw->device_irq_mode = XRP_IRQ_LEVEL;
 		dev_dbg(&pdev->dev,
-			"%s: device IRQ MMIO host offset = 0x%08x, offset = 0x%08x, bit = %d, device IRQ = %d, IRQ mode = %d",
-			__func__, hw->device_irq_host_offset,
-			hw->device_irq[0], hw->device_irq[1],
-			hw->device_irq[2], hw->device_irq_mode);
+			"%s: device IRQ = %d\n",
+			__func__, hw->device_irq);
 	} else {
 		dev_info(&pdev->dev,
 			 "using polling mode on the device side\n");
