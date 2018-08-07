@@ -272,6 +272,8 @@ static inline unsigned int __ipc_lock_status(void __iomem *base)
 
 static inline void __ipc_set_src(void __iomem *base, int source, int mdev)
 {
+	pr_err("%s: base = %p, source = %d, mdev = %d\n",
+	       __func__, base, source, mdev);
 	__raw_writel(IPCBITMASK(source), base + IPCMBxSOURCE(mdev));
 }
 
@@ -282,11 +284,15 @@ static inline unsigned int __ipc_read_src(void __iomem *base, int mdev)
 
 static inline void __ipc_set_des(void __iomem *base, int source, int mdev)
 {
+	pr_err("%s: base = %p, des = %d, mdev = %d\n",
+	       __func__, base, source, mdev);
 	__raw_writel(IPCBITMASK(source), base + IPCMBxDSET(mdev));
 }
 
 static inline void __ipc_clr_des(void __iomem *base, int source, int mdev)
 {
+	pr_err("%s: base = %p, des = %d, mdev = %d\n",
+	       __func__, base, source, mdev);
 	__raw_writel(IPCBITMASK(source), base + IPCMBxDCLR(mdev));
 }
 
@@ -297,6 +303,8 @@ static inline unsigned int __ipc_des_status(void __iomem *base, int mdev)
 
 static inline void __ipc_send(void __iomem *base, unsigned int tosend, int mdev)
 {
+	pr_err("%s: base = %p, tosend = %d, mdev = %d\n",
+	       __func__, base, tosend, mdev);
 	__raw_writel(tosend, base + IPCMBxSEND(mdev));
 }
 
@@ -307,6 +315,8 @@ static inline unsigned int __ipc_read(void __iomem *base, int mdev, int index)
 
 static inline void __ipc_write(void __iomem *base, u32 data, int mdev, int index)
 {
+	pr_err("%s: base = %p, data = 0x%08x, index = %d, mdev = %d\n",
+	       __func__, base, data, index, mdev);
 	__raw_writel(data, base + IPCMBxDATA(mdev, index));
 }
 
@@ -319,6 +329,8 @@ static inline void __ipc_cpu_imask_clr(void __iomem *base, unsigned int toclr, i
 {
 	unsigned int reg;
 
+	pr_err("%s: base = %p, toclr = %d, mdev = %d\n",
+	       __func__, base, toclr, mdev);
 	reg = __raw_readl(base + IPCMBxIMASK(mdev));
 	reg = reg & (~(toclr));
 
@@ -327,11 +339,15 @@ static inline void __ipc_cpu_imask_clr(void __iomem *base, unsigned int toclr, i
 
 static inline void __ipc_cpu_imask_all(void __iomem *base, int mdev)
 {
+	pr_err("%s: base = %p, mdev = %d\n",
+	       __func__, base, mdev);
 	__raw_writel((~0), base + IPCMBxIMASK(mdev));
 }
 
 static inline void __ipc_cpu_iclr(void __iomem *base, unsigned int toclr, int mdev)
 {
+	pr_err("%s: base = %p, toclr = %d, mdev = %d\n",
+	       __func__, base, toclr, mdev);
 	__raw_writel(toclr, base + IPCMBxICLR(mdev));
 }
 
@@ -357,6 +373,8 @@ static inline unsigned int __ipc_status(void __iomem *base, int mdev)
 
 static inline void __ipc_mode(void __iomem *base, unsigned int mode, int mdev)
 {
+	pr_err("%s: base = %p, mode = %d, mdev = %d\n",
+	       __func__, base, mode, mdev);
 	__raw_writel(mode, base + IPCMBxMODE(mdev));
 }
 
@@ -673,6 +691,7 @@ static int hisi_mdev_send_msg(struct hisi_mbox_device *mdev, mbox_msg_t *msg, mb
 		goto out;
 	}
 
+	pr_err("%s: ack_mode = %d\n", __func__, ack_mode);
 	if (hisi_mdev_occupy(mdev)) {
 		MDEV_ERR("mdev %s can not be occupied\n", mdev->name);
 		err = -EMDEVCLEAN;
