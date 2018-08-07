@@ -112,9 +112,7 @@ static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 
 static int send_cmd_async(struct xrp_hw_hikey *hw, uint32_t mbx, uint32_t cmd)
 {
-	uint32_t omsg = cmd;
-	int ret = RPROC_ASYNC_SEND(mbx,
-				   &omsg, sizeof(omsg));
+	int ret = RPROC_ASYNC_SEND(mbx, &cmd, 1);
 	if (ret != 0) {
 		dev_err(hw->dev, "%s: RPROC_ASYNC_SEND ret = %d\n",
 			__func__, ret);
