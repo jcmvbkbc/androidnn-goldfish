@@ -234,8 +234,6 @@ static irqreturn_t irq_handler(int irq, void *dev_id)
 	return ret;
 }
 
-#warning "cache operations are not implemented for this architecture"
-
 static bool panic_check(void *hw_arg)
 {
 	struct xrp_hw_hikey *hw = hw_arg;
@@ -298,6 +296,11 @@ static bool panic_check(void *hw_arg)
 	return panic == 0xdeadbabe;
 }
 
+static bool cacheable(unsigned long pfn, unsigned long n_pages)
+{
+	return pfn_valid(pfn);
+}
+
 static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 {
 	pr_debug("%s: vaddr = %p, paddr = %pa, sz = 0x%lx\n",
@@ -331,6 +334,7 @@ static const struct xrp_hw_ops hw_ops = {
 
 	.send_irq = send_irq,
 
+	.cacheable = cacheable,
 	.clean_cache = clean_cache,
 	.flush_cache = flush_cache,
 
