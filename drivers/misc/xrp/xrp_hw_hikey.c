@@ -261,6 +261,28 @@ static bool panic_check(void *hw_arg)
 	return panic == 0xdeadbabe;
 }
 
+static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
+{
+	pr_debug("%s: vaddr = %p, paddr = %pa, sz = 0x%lx\n",
+	       __func__, vaddr, &paddr, sz);
+	if (pfn_valid(__phys_to_pfn(paddr))) {
+		__clean_dcache_area_poc(__va(paddr), sz);
+	} else {
+		pr_debug("PFN is not valid, doing nothing\n");
+	}
+}
+
+static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
+{
+	pr_debug("%s: vaddr = %p, paddr = %pa, sz = 0x%lx\n",
+	       __func__, vaddr, &paddr, sz);
+	if (pfn_valid(__phys_to_pfn(paddr))) {
+		__dma_flush_area(__va(paddr), sz);
+	} else {
+		pr_debug("PFN is not valid, doing nothing\n");
+	}
+}
+
 static const struct xrp_hw_ops hw_ops = {
 	.enable = enable,
 	.disable = disable,
@@ -271,6 +293,9 @@ static const struct xrp_hw_ops hw_ops = {
 	.get_hw_sync_data = get_hw_sync_data,
 
 	.send_irq = send_irq,
+
+	.clean_cache = clean_cache,
+	.flush_cache = flush_cache,
 
 	.panic_check = panic_check,
 };
