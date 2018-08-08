@@ -30,6 +30,7 @@
 #define _XRP_HW
 
 #include <linux/irqreturn.h>
+#include <linux/mm_types.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
 
@@ -52,6 +53,7 @@ struct xrp_hw_ops {
 	/* send IRQ to the core */
 	void (*send_irq)(void *hw_arg);
 
+	bool (*cacheable)(unsigned long pfn, unsigned long n_pages);
 	void (*clean_cache)(void *vaddr, phys_addr_t paddr, unsigned long sz);
 	void (*flush_cache)(void *vaddr, phys_addr_t paddr, unsigned long sz);
 

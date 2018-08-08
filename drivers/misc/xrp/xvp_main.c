@@ -674,7 +674,7 @@ static long xvp_copy_virt_to_phys(struct xvp_file *xvp_file,
 				  struct xrp_alien_mapping *mapping)
 {
 	phys_addr_t phys;
-	unsigned long align = clamp(vaddr & -vaddr, PAGE_SIZE, 16ul);
+	unsigned long align = clamp(vaddr & -vaddr, 16ul, PAGE_SIZE);
 	unsigned long offset = vaddr & (align - 1);
 	struct xrp_allocation *allocation;
 	long rc;
@@ -865,6 +865,7 @@ static long __xrp_share_block(struct file *filp,
 			mapping->type = XRP_MAPPING_NATIVE;
 			mapping->xrp_allocation = xrp_allocation;
 			xrp_allocation_get(mapping->xrp_allocation);
+			do_cache = vma_needs_cache_ops(vma);
 		}
 	}
 	if (rc < 0) {
@@ -875,20 +876,34 @@ static long __xrp_share_block(struct file *filp,
 		pr_debug("%s: non-XVP allocation at 0x%08lx\n",
 			 __func__, virt);
 
-		if (xvp->hw_ops->clean_cache ||
+		/*
+		 * A range can only be mapped directly if it is either
+		 * uncached or HW-specific cache operations can handle it.
+		 */
+		if (xvp->hw_ops->cacheable ||
 		    (vma && !vma_needs_cache_ops(vma))) {
 			if (vma && vma->vm_flags & (VM_IO | VM_PFNMAP)) {
 				rc = xvp_pfn_virt_to_phys(xvp_file, vma,
 							  virt, size,
 							  &phys,
 							  alien_mapping);
+				if (rc == 0 && vma_needs_cache_ops(vma) &&
+				    !xvp->hw_ops->cacheable(phys >> PAGE_SHIFT,
+							    size >> PAGE_SHIFT))
+					rc = -EINVAL;
 			} else {
 				up_read(&mm->mmap_sem);
 				rc = xvp_gup_virt_to_phys(xvp_file, virt,
 							  size, &phys,
 							  alien_mapping);
+				/*
+				 * HW-specific cache operations must handle
+				 * ordinary memory.
+				 */
 				down_read(&mm->mmap_sem);
 			}
+			if (rc == 0 && vma && !vma_needs_cache_ops(vma))
+				do_cache = false;
 		} else {
 			pr_debug("%s: not mapping directly: no HW cache ops\n",
 				 __func__);
@@ -921,7 +936,8 @@ static long __xrp_share_block(struct file *filp,
 	pr_debug("%s: mapping = %p, mapping->type = %d\n",
 		 __func__, mapping, mapping->type);
 
-	if (do_cache && xvp->hw_ops->clean_cache) {
+	WARN_ON_ONCE(do_cache && !xvp->hw_ops->cacheable);
+	if (do_cache && xvp->hw_ops->cacheable) {
 		if (flags & XRP_FLAG_WRITE) {
 			xvp->hw_ops->flush_cache((void *)virt, phys, size);
 		} else if (flags & XRP_FLAG_READ) {
@@ -1499,9 +1515,13 @@ static int xvp_mmap(struct file *filp, struct vm_area_struct *vma)
 		struct xvp *xvp = xvp_file->xvp;
 		pgprot_t prot = vma->vm_page_prot;
 
-		if (!xvp->hw_ops->clean_cache ||
-		    !pfn_valid(pfn))
+		if (!xvp->hw_ops->cacheable ||
+		    !xvp->hw_ops->cacheable(pfn,
+					    (vma->vm_end - vma->vm_start)
+					    >> PAGE_SHIFT)) {
 			prot = pgprot_writecombine(prot);
+			vma->vm_page_prot = prot;
+		}
 
 		err = remap_pfn_range(vma, vma->vm_start, pfn,
 				      vma->vm_end - vma->vm_start,
@@ -1747,9 +1767,14 @@ static long xrp_init_common(struct platform_device *pdev,
 {
 	long ret;
 	char nodename[sizeof("xvp") + 3 * sizeof(int)];
-	struct xvp *xvp = devm_kzalloc(&pdev->dev, sizeof(*xvp), GFP_KERNEL);
+	struct xvp *xvp;
 	int nodeid;
 
+	if (WARN_ON(hw_ops->cacheable &&
+	    (!hw_ops->clean_cache || !hw_ops->flush_cache)))
+		return -EINVAL;
+
+	xvp = devm_kzalloc(&pdev->dev, sizeof(*xvp), GFP_KERNEL);
 	if (!xvp) {
 		ret = -ENOMEM;
 		goto err;
@@ -1885,6 +1910,11 @@ static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 	return p;
 }
 
+static bool cacheable(unsigned long pfn, unsigned long n_pages)
+{
+	return true;
+}
+
 static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 {
 }
@@ -1895,6 +1925,7 @@ static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 
 static const struct xrp_hw_ops hw_ops = {
 	.get_hw_sync_data = get_hw_sync_data,
+	.cacheable = cacheable,
 	.clean_cache = clean_cache,
 	.flush_cache = flush_cache,
 };
