@@ -54,6 +54,8 @@ enum xrp_irq_mode {
 
 struct ring_buffer {
 	uint32_t panic;
+	uint32_t interrupt;
+	uint32_t ccount;
 	uint32_t read;
 	uint32_t write;
 	uint32_t size;
@@ -151,17 +153,52 @@ static void dump_log_page(struct xrp_hw_hikey *hw)
 	}
 }
 
+static void dump_regs(const char *fn, void *hw_arg)
+{
+	struct xrp_hw_hikey *hw = hw_arg;
+	if (!hw->log_rb)
+		return;
+	dev_err(hw->dev, "%s: panic = 0x%08x, ccount = 0x%08x, interrupt = 0x%08x\n",
+		fn,
+		__raw_readl(&hw->log_rb->panic),
+		__raw_readl(&hw->log_rb->ccount),
+		__raw_readl(&hw->log_rb->interrupt));
+}
+
 static void halt(void *hw_arg)
 {
+	struct xrp_hw_hikey *hw = hw_arg;
+	int i;
+
+	dev_err(hw->dev, "%s\n", __func__);
+	dump_regs(__func__, hw);
+	dump_log_page(hw);
+
 	send_cmd_async(hw_arg, HISI_RPROC_LPM3_MBX17,
 		       (16 << 16) | (3 << 8) | (1 << 0));
-	udelay(100);
+	for (i = 0; i < 10; ++i) {
+		schedule();
+		mdelay(1);
+		dump_regs(__func__, hw);
+	}
+	dev_err(hw->dev, "%s done\n", __func__);
 }
 
 static void release(void *hw_arg)
 {
-	send_cmd_async(hw_arg, HISI_RPROC_HIFI_MBX18, 0);
-	udelay(100);
+	struct xrp_hw_hikey *hw = hw_arg;
+	int i;
+
+	dev_err(hw->dev, "%s\n", __func__);
+	dump_regs(__func__, hw);
+
+	send_cmd_async(hw_arg, HISI_RPROC_HIFI_MBX18, 0xb007);
+	for (i = 0; i < 10; ++i) {
+		schedule();
+		mdelay(1);
+		dump_regs(__func__, hw);
+	}
+	dev_err(hw->dev, "%s done\n", __func__);
 }
 
 static void send_irq(void *hw_arg)
