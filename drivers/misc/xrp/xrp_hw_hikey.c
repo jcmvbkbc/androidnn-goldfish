@@ -146,7 +146,7 @@ static void dump_log_page(struct xrp_hw_hikey *hw)
 	if (buf) {
 		memcpy_fromio(buf, hw->log_rb, PAGE_SIZE);
 		for (i = 0; i < PAGE_SIZE; i += 64)
-			dev_err(hw->dev, "  %*pEhp\n", 64, buf + i);
+			dev_info(hw->dev, "  %*pEhp\n", 64, buf + i);
 		kfree(buf);
 	} else {
 		dev_err(hw->dev, "  (couldn't allocate copy buffer)\n");
@@ -158,7 +158,7 @@ static void dump_regs(const char *fn, void *hw_arg)
 	struct xrp_hw_hikey *hw = hw_arg;
 	if (!hw->log_rb)
 		return;
-	dev_err(hw->dev, "%s: panic = 0x%08x, ccount = 0x%08x, interrupt = 0x%08x\n",
+	dev_dbg(hw->dev, "%s: panic = 0x%08x, ccount = 0x%08x, interrupt = 0x%08x\n",
 		fn,
 		__raw_readl(&hw->log_rb->panic),
 		__raw_readl(&hw->log_rb->ccount),
@@ -170,7 +170,7 @@ static void halt(void *hw_arg)
 	struct xrp_hw_hikey *hw = hw_arg;
 	int i;
 
-	dev_err(hw->dev, "%s\n", __func__);
+	dev_dbg(hw->dev, "%s\n", __func__);
 	dump_regs(__func__, hw);
 	dump_log_page(hw);
 
@@ -181,7 +181,7 @@ static void halt(void *hw_arg)
 		mdelay(1);
 		dump_regs(__func__, hw);
 	}
-	dev_err(hw->dev, "%s done\n", __func__);
+	dev_dbg(hw->dev, "%s done\n", __func__);
 }
 
 static void release(void *hw_arg)
@@ -189,7 +189,7 @@ static void release(void *hw_arg)
 	struct xrp_hw_hikey *hw = hw_arg;
 	int i;
 
-	dev_err(hw->dev, "%s\n", __func__);
+	dev_dbg(hw->dev, "%s\n", __func__);
 	dump_regs(__func__, hw);
 
 	send_cmd_async(hw_arg, HISI_RPROC_HIFI_MBX18, 0xb007);
@@ -198,7 +198,7 @@ static void release(void *hw_arg)
 		mdelay(1);
 		dump_regs(__func__, hw);
 	}
-	dev_err(hw->dev, "%s done\n", __func__);
+	dev_dbg(hw->dev, "%s done\n", __func__);
 }
 
 static void send_irq(void *hw_arg)
@@ -289,7 +289,7 @@ static bool panic_check(void *hw_arg)
 		}
 	}
 	if (panic == 0xdeadbabe) {
-		dev_err(hw->dev, "%s: panic detected, log dump:\n", __func__);
+		dev_info(hw->dev, "%s: panic detected, log dump:\n", __func__);
 		dump_log_page(hw);
 	}
 
