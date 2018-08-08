@@ -186,6 +186,11 @@
 			reg = <0x0 0x8B300000 0x0 0x380000>;
 			no-map;
 		};
+		xrp_reserved: hifi-data1 {
+			reg = <0x0 0x40000000 0x0 0x10000000>;
+			compatible = "shared-dma-pool";
+			reusable;
+		};
 	};
 
 	reboot-mode-syscon@32100000 {
@@ -218,10 +223,11 @@
 	xrp@0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
-		compatible = "cdns,xrp-hw-hikey,v1";
+		compatible = "cdns,xrp-hw-hikey,cma";
+		memory-region = <&xrp_reserved>;
 		reg = <
-		       0x0 0x8b301000 0x0 0x0037f000 /* Shared memory */
 		       0x0 0x8b300000 0x0 0x00001000 /* Panic/log page */
+		       0x0 0x8b301000 0x0 0x0037f000 /* Shared memory */
 		      >;
 		device-irq = <3>;
 		firmware-name = "xrp0.elf";
