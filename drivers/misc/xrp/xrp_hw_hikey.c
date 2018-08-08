@@ -133,6 +133,24 @@ static void reset(void *hw_arg)
 {
 }
 
+static void dump_log_page(struct xrp_hw_hikey *hw)
+{
+	char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	size_t i;
+
+	if (!hw->log_rb)
+		return;
+
+	if (buf) {
+		memcpy_fromio(buf, hw->log_rb, PAGE_SIZE);
+		for (i = 0; i < PAGE_SIZE; i += 64)
+			dev_err(hw->dev, "  %*pEhp\n", 64, buf + i);
+		kfree(buf);
+	} else {
+		dev_err(hw->dev, "  (couldn't allocate copy buffer)\n");
+	}
+}
+
 static void halt(void *hw_arg)
 {
 	send_cmd_async(hw_arg, HISI_RPROC_LPM3_MBX17,
@@ -235,8 +253,10 @@ static bool panic_check(void *hw_arg)
 				__func__, total);
 		}
 	}
-	if (panic == 0xdeadbabe)
-		dev_err(hw->dev, "%s: panic detected\n", __func__);
+	if (panic == 0xdeadbabe) {
+		dev_err(hw->dev, "%s: panic detected, log dump:\n", __func__);
+		dump_log_page(hw);
+	}
 
 	return panic == 0xdeadbabe;
 }
