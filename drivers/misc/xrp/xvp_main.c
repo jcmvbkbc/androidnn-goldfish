@@ -1569,8 +1569,7 @@ static int xvp_close(struct inode *inode, struct file *filp)
 
 	xrp_remove_known_file(filp);
 	devm_kfree(xvp_file->xvp->dev, xvp_file);
-	pm_runtime_mark_last_busy(xvp_file->xvp->dev);
-	pm_runtime_put_sync_autosuspend(xvp_file->xvp->dev);
+	pm_runtime_put_sync(xvp_file->xvp->dev);
 	return 0;
 }
 
@@ -1816,9 +1815,6 @@ static long xrp_init_common(struct platform_device *pdev,
 		ret = xrp_runtime_resume(xvp->dev);
 		if (ret)
 			goto err_pm_disable;
-	} else {
-		pm_runtime_set_autosuspend_delay(xvp->dev, 3600000);
-		pm_runtime_use_autosuspend(xvp->dev);
 	}
 
 	nodeid = ida_simple_get(&xvp_nodeid, 0, 0, GFP_KERNEL);
