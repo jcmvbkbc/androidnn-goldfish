@@ -1499,7 +1499,8 @@ static int xvp_mmap(struct file *filp, struct vm_area_struct *vma)
 		struct xvp *xvp = xvp_file->xvp;
 		pgprot_t prot = vma->vm_page_prot;
 
-		if (!xvp->hw_ops->clean_cache)
+		if (!xvp->hw_ops->clean_cache ||
+		    !pfn_valid(pfn))
 			prot = pgprot_writecombine(prot);
 
 		err = remap_pfn_range(vma, vma->vm_start, pfn,
