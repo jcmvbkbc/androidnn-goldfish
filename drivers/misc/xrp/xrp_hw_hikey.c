@@ -108,6 +108,16 @@ static int send_cmd_async(struct xrp_hw_hikey *hw, uint32_t mbx, uint32_t cmd)
 	return ret;
 }
 
+static int send_cmd_sync(struct xrp_hw_hikey *hw, uint32_t mbx, uint32_t cmd)
+{
+	int ret = hisi_rproc_xfer_sync_auto(mbx, &cmd, 1, NULL, 0);
+	if (ret != 0) {
+		dev_err(hw->dev, "%s: RPROC_SYNC_SEND ret = %d\n",
+			__func__, ret);
+	}
+	return ret;
+}
+
 static int enable(void *hw_arg)
 {
 	return 0;
@@ -170,7 +180,7 @@ static void halt(void *hw_arg)
 	dump_regs(__func__, hw);
 	dump_log_page(hw);
 
-	send_cmd_async(hw_arg, HISI_RPROC_LPM3_MBX17,
+	send_cmd_sync(hw_arg, HISI_RPROC_LPM3_MBX17,
 		       (16 << 16) | (3 << 8) | (1 << 0));
 	for (i = 0; i < 10; ++i) {
 		schedule();
