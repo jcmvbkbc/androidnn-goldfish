@@ -59,6 +59,8 @@ struct ring_buffer {
 	uint32_t read;
 	uint32_t write;
 	uint32_t size;
+	uint32_t stack;
+	uint32_t reserved[9];
 	char data[0];
 };
 
@@ -69,6 +71,7 @@ struct xrp_hw_hikey {
 	phys_addr_t regs_phys;
 	struct ring_buffer __iomem *log_rb;
 	void __iomem *regs;
+	uint32_t last_read;
 
 	/* how IRQ is used to notify the device of incoming data */
 	enum xrp_irq_mode device_irq_mode;
@@ -84,12 +87,6 @@ struct xrp_hw_hikey {
 	 */
 	u32 host_irq[2];
 };
-
-static inline void reg_write32(struct xrp_hw_hikey *hw, unsigned addr, u32 v)
-{
-	if (hw->regs)
-		__raw_writel(v, hw->regs + addr);
-}
 
 static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 {
@@ -135,14 +132,36 @@ static void reset(void *hw_arg)
 {
 }
 
+static void dump_regs(const char *fn, void *hw_arg)
+{
+	struct xrp_hw_hikey *hw = hw_arg;
+
+	if (!hw->log_rb)
+		return;
+
+	dev_info(hw->dev, "%s: panic = 0x%08x, ccount = 0x%08x, interrupt = 0x%08x\n",
+		 fn,
+		 __raw_readl(&hw->log_rb->panic),
+		 __raw_readl(&hw->log_rb->ccount),
+		 __raw_readl(&hw->log_rb->interrupt));
+	dev_info(hw->dev, "%s: read = 0x%08x, write = 0x%08x, size = 0x%08x, stack = 0x%08x\n",
+		 fn,
+		 __raw_readl(&hw->log_rb->read),
+		 __raw_readl(&hw->log_rb->write),
+		 __raw_readl(&hw->log_rb->size),
+		 __raw_readl(&hw->log_rb->stack));
+}
+
 static void dump_log_page(struct xrp_hw_hikey *hw)
 {
-	char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	char *buf;
 	size_t i;
 
 	if (!hw->log_rb)
 		return;
 
+	dump_regs(__func__, hw);
+	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (buf) {
 		memcpy_fromio(buf, hw->log_rb, PAGE_SIZE);
 		for (i = 0; i < PAGE_SIZE; i += 64)
@@ -151,18 +170,6 @@ static void dump_log_page(struct xrp_hw_hikey *hw)
 	} else {
 		dev_err(hw->dev, "  (couldn't allocate copy buffer)\n");
 	}
-}
-
-static void dump_regs(const char *fn, void *hw_arg)
-{
-	struct xrp_hw_hikey *hw = hw_arg;
-	if (!hw->log_rb)
-		return;
-	dev_dbg(hw->dev, "%s: panic = 0x%08x, ccount = 0x%08x, interrupt = 0x%08x\n",
-		fn,
-		__raw_readl(&hw->log_rb->panic),
-		__raw_readl(&hw->log_rb->ccount),
-		__raw_readl(&hw->log_rb->interrupt));
 }
 
 static void halt(void *hw_arg)
@@ -238,6 +245,7 @@ static bool panic_check(void *hw_arg)
 {
 	struct xrp_hw_hikey *hw = hw_arg;
 	uint32_t panic;
+	uint32_t ccount;
 	uint32_t read;
 	uint32_t write;
 	uint32_t size;
@@ -246,15 +254,22 @@ static bool panic_check(void *hw_arg)
 		return false;
 
 	panic = __raw_readl(&hw->log_rb->panic);
+	ccount = __raw_readl(&hw->log_rb->ccount);
 	read = __raw_readl(&hw->log_rb->read);
 	write = __raw_readl(&hw->log_rb->write);
 	size = __raw_readl(&hw->log_rb->size);
 
-	if (write < size && read < size) {
+	if (read == 0 && read != hw->last_read) {
+		dev_warn(hw->dev, "****************** device restarted >>>>>>>>>>>>>>>>>\n");
+		dump_log_page(hw);
+		dev_warn(hw->dev, "<<<<<<<<<<<<<<<<<< device restarted *****************\n");
+	}
+	if (write < size && read < size && size < PAGE_SIZE) {
 		uint32_t tail;
 		uint32_t total;
 		char *buf = NULL;
 
+		hw->last_read = read;
 		if (read < write) {
 			tail = write - read;
 			total = tail;
@@ -271,6 +286,10 @@ static bool panic_check(void *hw_arg)
 
 		if (buf) {
 			uint32_t off = 0;
+
+			dev_info(hw->dev, "panic = 0x%08x, ccount = 0x%08x, read = %d, write = %d, size = %d, total = %d",
+				 panic, ccount, read, write, size, total);
+
 			while (off != total) {
 				memcpy_fromio(buf + off,
 					      hw->log_rb->data + read,
@@ -280,12 +299,20 @@ static bool panic_check(void *hw_arg)
 				tail = total - tail;
 			}
 			__raw_writel(write, &hw->log_rb->read);
-			dev_info(hw->dev, "<<<\n%.*s\n>>>\n", total, buf);
+			dev_info(hw->dev, "<<<\n%.*s\n>>>\n",
+				 total, buf);
 			kfree(buf);
 		} else if (total) {
 			dev_err(hw->dev,
 				"%s: couldn't allocate memory (%d) to read the dump\n",
 				__func__, total);
+		}
+	} else {
+		if (read != hw->last_read) {
+			dev_warn(hw->dev,
+				 "nonsense in the log buffer: read = %d, write = %d, size = %d\n",
+				 read, write, size);
+			hw->last_read = read;
 		}
 	}
 	if (panic == 0xdeadbabe) {
