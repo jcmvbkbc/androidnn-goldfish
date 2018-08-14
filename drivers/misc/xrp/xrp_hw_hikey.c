@@ -39,11 +39,10 @@
 #include "xrp_hw_simple_dsp_interface.h"
 
 #include <linux/hisi/hisi_rproc.h>
+#include <ipcm/bsp_drv_ipc.h>
+#include <mailbox/drv_mailbox_msg.h>
 
 #define DRIVER_NAME "xrp-hw-hikey"
-
-#define XRP_REG_RESET		(0x04)
-#define XRP_REG_RUNSTALL	(0x08)
 
 enum xrp_irq_mode {
 	XRP_IRQ_NONE,
@@ -68,24 +67,17 @@ struct xrp_hw_hikey {
 	struct xvp *xrp;
 	struct device *dev;
 
-	phys_addr_t regs_phys;
 	struct ring_buffer __iomem *log_rb;
-	void __iomem *regs;
 	uint32_t last_read;
 
 	/* how IRQ is used to notify the device of incoming data */
 	enum xrp_irq_mode device_irq_mode;
 	/* device IRQ# */
 	u32 device_irq;
-	/* offset of devuce IRQ register in MMIO region (host side) */
-	u32 device_irq_host_offset;
 	/* how IRQ is used to notify the host of incoming data */
 	enum xrp_irq_mode host_irq_mode;
-	/*
-	 * offset of IRQ register (device side)
-	 * bit number
-	 */
-	u32 host_irq[2];
+	/* dummy host IRQ */
+	u32 host_irq;
 };
 
 static void *get_hw_sync_data(void *hw_arg, size_t *sz)
@@ -98,10 +90,7 @@ static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 		return NULL;
 
 	*hw_sync_data = (struct xrp_hw_simple_sync_data){
-		.device_mmio_base = hw->regs_phys,
 		.host_irq_mode = hw->host_irq_mode,
-		.host_irq_offset = hw->host_irq[0],
-		.host_irq_bit = hw->host_irq[1],
 		.device_irq_mode = hw->device_irq_mode,
 		.device_irq = hw->device_irq,
 	};
@@ -222,23 +211,19 @@ static void send_irq(void *hw_arg)
 	}
 }
 
-static void ack_irq(void *hw_arg)
-{
-	struct xrp_hw_hikey *hw = hw_arg;
-
-	if (hw->host_irq_mode == XRP_IRQ_LEVEL)
-		reg_write32(hw, hw->host_irq[0], 0);
-}
-
-static irqreturn_t irq_handler(int irq, void *dev_id)
+static void irq_handler(void *dev_id)
 {
 	struct xrp_hw_hikey *hw = dev_id;
-	irqreturn_t ret = xrp_irq_handler(irq, hw->xrp);
 
-	if (ret == IRQ_HANDLED)
-		ack_irq(hw);
+	dev_dbg(hw->dev, "%s\n", __func__);
+	xrp_irq_handler(0, hw->xrp);
+	DRV_k3IpcIntHandler_Autoack();
+}
 
-	return ret;
+static void *irq_handler_context;
+static void irq1_handler(unsigned int dummy)
+{
+	irq_handler(irq_handler_context);
 }
 
 static bool panic_check(void *hw_arg)
@@ -372,7 +357,6 @@ static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
 		    int mem_idx, enum xrp_init_flags *init_flags)
 {
 	struct resource *mem;
-	int irq;
 	long ret;
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, mem_idx);
@@ -403,42 +387,22 @@ static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
 			 "using polling mode on the device side\n");
 	}
 
-	ret = of_property_read_u32_array(pdev->dev.of_node, "host-irq",
-					 hw->host_irq,
-					 ARRAY_SIZE(hw->host_irq));
+	ret = of_property_read_u32(pdev->dev.of_node,
+				   "host-irq",
+				   &hw->host_irq);
 	if (ret == 0) {
-		u32 host_irq_mode;
-
-		ret = of_property_read_u32(pdev->dev.of_node,
-					   "host-irq-mode",
-					   &host_irq_mode);
-		if (host_irq_mode < XRP_IRQ_MAX)
-			hw->host_irq_mode = host_irq_mode;
-		else
-			ret = -ENOENT;
-	}
-
-	if (ret == 0 && hw->host_irq_mode != XRP_IRQ_NONE)
-		irq = platform_get_irq(pdev, 0);
-	else
-		irq = -1;
-
-	if (irq >= 0) {
-		dev_dbg(&pdev->dev, "%s: host IRQ = %d, ",
-			__func__, irq);
-		ret = devm_request_irq(&pdev->dev, irq, irq_handler,
-				       IRQF_SHARED, pdev->name, hw);
-		if (ret < 0) {
-			dev_err(&pdev->dev, "request_irq %d failed\n", irq);
-			goto err;
-		}
+		hw->host_irq_mode = XRP_IRQ_LEVEL;
+		dev_dbg(&pdev->dev, "%s: using host IRQ\n", __func__);
+		irq_handler_context = hw;
+		DRV_IPCIntInit();
+		IPC_IntConnect(IPC_ACPU_INT_SRC_HIFI_MSG,
+			       irq1_handler, 0);
+		IPC_IntEnable(IPC_ACPU_INT_SRC_HIFI_MSG);
 		*init_flags |= XRP_INIT_USE_HOST_IRQ;
 	} else {
 		dev_info(&pdev->dev, "using polling mode on the host side\n");
 	}
-	ret = 0;
-err:
-	return ret;
+	return 0;
 }
 
 typedef long init_function(struct platform_device *pdev,
