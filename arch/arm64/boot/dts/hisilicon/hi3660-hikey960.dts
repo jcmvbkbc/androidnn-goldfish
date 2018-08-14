@@ -187,7 +187,7 @@
 			no-map;
 		};
 		xrp_reserved: hifi-data1 {
-			reg = <0x0 0x40000000 0x0 0x10000000>;
+			reg = <0x0 0x60000000 0x0 0x10000000>;
 			compatible = "shared-dma-pool";
 			reusable;
 		};
@@ -230,6 +230,7 @@
 		       0x0 0x8b301000 0x0 0x0037f000 /* Shared memory */
 		      >;
 		device-irq = <3>;
+		/*host-irq = <0>;*/
 		firmware-name = "xrp0.elf";
 		ranges = <
 			  0x00000000  0x0 0x00000000  0x89200000
