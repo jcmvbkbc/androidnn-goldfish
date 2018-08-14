@@ -315,10 +315,14 @@ static int xrp_synchronize(struct xvp *xvp)
 	xrp_send_device_irq(xvp);
 
 	if (xvp->host_irq_mode) {
-		int res = wait_for_completion_timeout(&xvp->completion,
-						      firmware_command_timeout * HZ);
-		if (xrp_panic_check(xvp))
-			goto err;
+		int res = 0;
+		int i;
+
+		for (i = 0; !res && i < firmware_command_timeout; ++i) {
+			if (xrp_panic_check(xvp))
+				goto err;
+			res = wait_for_completion_timeout(&xvp->completion, HZ);
+		}
 		if (res == 0) {
 			dev_err(xvp->dev,
 				"host IRQ mode is requested, but DSP couldn't deliver IRQ during synchronization\n");
@@ -1419,7 +1423,9 @@ static long xrp_ioctl_submit_sync(struct file *filp,
 				ret = xvp_complete_cmd_poll(xvp,
 							    xrp_cmd_complete);
 			}
-
+#ifdef DEBUG
+			xrp_panic_check(xvp);
+#endif
 			/* copy back inline data */
 			if (ret == 0) {
 				ret = xrp_complete_hw_request(xvp->comm, rq);
