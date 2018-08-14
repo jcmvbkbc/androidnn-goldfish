@@ -192,11 +192,12 @@ out:
 
 EXPORT_SYMBOL(hisi_rproc_xfer_async);
 
-int hisi_rproc_xfer_sync(rproc_id_t rproc_id, rproc_msg_t *msg, rproc_msg_len_t len, rproc_msg_t *ack_buffer, rproc_msg_len_t ack_buffer_len)
+static int hisi_rproc_xfer_sync_ack(rproc_id_t rproc_id, rproc_msg_t *msg, rproc_msg_len_t len,
+				    rproc_msg_t *ack_buffer, rproc_msg_len_t ack_buffer_len,
+				    mbox_ack_type_t ack_type)
 {
 	struct hisi_rproc_info *rproc;
 	struct hisi_mbox *mbox = NULL;
-	mbox_ack_type_t ack_type = MANUAL_ACK;
 	int ret = 0;
 
 	if (WARN_ON(!IS_READY())) {
@@ -225,6 +226,17 @@ int hisi_rproc_xfer_sync(rproc_id_t rproc_id, rproc_msg_t *msg, rproc_msg_len_t 
 
 out:
 	return ret;
+}
+
+int hisi_rproc_xfer_sync_auto(rproc_id_t rproc_id, rproc_msg_t *msg, rproc_msg_len_t len, rproc_msg_t *ack_buffer, rproc_msg_len_t ack_buffer_len)
+{
+	return hisi_rproc_xfer_sync_ack(rproc_id, msg, len, ack_buffer, ack_buffer_len, AUTO_ACK);
+}
+EXPORT_SYMBOL(hisi_rproc_xfer_sync_auto);
+
+int hisi_rproc_xfer_sync(rproc_id_t rproc_id, rproc_msg_t *msg, rproc_msg_len_t len, rproc_msg_t *ack_buffer, rproc_msg_len_t ack_buffer_len)
+{
+	return hisi_rproc_xfer_sync_ack(rproc_id, msg, len, ack_buffer, ack_buffer_len, MANUAL_ACK);
 }
 
 EXPORT_SYMBOL(hisi_rproc_xfer_sync);

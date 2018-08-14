@@ -356,9 +356,13 @@ int hisi_mbox_msg_send_sync(struct hisi_mbox *mbox,
 
 	/* send */
 	mutex_lock(&mdev->dev_lock);
-	ret = hisi_mbox_task_send_sync(mdev, &tx_task);
-	if (!ret && ack_buffer) {
-		memcpy((void *)ack_buffer, (void *)tx_task.ack_buffer, sizeof(mbox_msg_t) / sizeof(u8) * ack_buffer_len);
+	if (need_auto_ack == AUTO_ACK) {
+		ret = hisi_mbox_task_send_async(mdev, &tx_task);
+	} else {
+		ret = hisi_mbox_task_send_sync(mdev, &tx_task);
+		if (!ret && ack_buffer) {
+			memcpy((void *)ack_buffer, (void *)tx_task.ack_buffer, sizeof(mbox_msg_t) / sizeof(u8) * ack_buffer_len);
+		}
 	}
 
 	PRINT_TTS(p_tx_task);

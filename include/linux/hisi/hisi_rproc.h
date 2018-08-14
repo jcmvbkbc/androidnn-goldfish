@@ -76,6 +76,11 @@ extern "C" {
 			rproc_msg_len_t len,
 			rproc_msg_t *ack_buffer,
 			rproc_msg_len_t ack_buffer_len);
+	extern int hisi_rproc_xfer_sync_auto(rproc_id_t rproc_id,
+			rproc_msg_t *msg,
+			rproc_msg_len_t len,
+			rproc_msg_t *ack_buffer,
+			rproc_msg_len_t ack_buffer_len);
 	extern int hisi_rproc_xfer_async(rproc_id_t rproc_id,
 			rproc_msg_t *msg,
 			rproc_msg_len_t len
