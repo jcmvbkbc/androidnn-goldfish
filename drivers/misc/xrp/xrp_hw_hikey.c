@@ -328,7 +328,8 @@ static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 	pr_debug("%s: vaddr = %p, paddr = %pa, sz = 0x%lx\n",
 	       __func__, vaddr, &paddr, sz);
 	if (pfn_valid(__phys_to_pfn(paddr))) {
-		__clean_dcache_area_poc(__va(paddr), sz);
+		dma_sync_single_for_device(dev, phys_to_dma(dev, paddr), sz,
+					   DMA_TO_DEVICE);
 	} else {
 		pr_debug("PFN is not valid, doing nothing\n");
 	}
@@ -339,7 +340,8 @@ static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
 	pr_debug("%s: vaddr = %p, paddr = %pa, sz = 0x%lx\n",
 	       __func__, vaddr, &paddr, sz);
 	if (pfn_valid(__phys_to_pfn(paddr))) {
-		__dma_flush_area(__va(paddr), sz);
+		dma_sync_single_for_device(dev, phys_to_dma(dev, paddr), sz,
+					   DMA_FROM_DEVICE);
 	} else {
 		pr_debug("PFN is not valid, doing nothing\n");
 	}
