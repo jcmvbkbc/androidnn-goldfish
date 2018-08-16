@@ -942,11 +942,7 @@ static long __xrp_share_block(struct file *filp,
 
 	WARN_ON_ONCE(do_cache && !xvp->hw_ops->cacheable);
 	if (do_cache && xvp->hw_ops->cacheable) {
-		if (flags & XRP_FLAG_WRITE) {
-			xvp->hw_ops->flush_cache((void *)virt, phys, size);
-		} else if (flags & XRP_FLAG_READ) {
-			xvp->hw_ops->clean_cache((void *)virt, phys, size);
-		}
+		xrp_dma_sync_for_device(xvp, phys, size, flags);
 	}
 	return 0;
 }
@@ -962,6 +958,8 @@ static long xrp_writeback_alien_mapping(struct xvp_file *xvp_file,
 
 	switch (alien_mapping->type) {
 	case ALIEN_GUP:
+		xrp_dma_sync_for_cpu(xvp_file->xvp, alien_mapping->paddr,
+				     alien_mapping->size, flags);
 		pr_debug("%s: dirtying alien GUP @va = %p, pa = %pap\n",
 			 __func__, (void __user *)alien_mapping->vaddr,
 			 &alien_mapping->paddr);
@@ -998,6 +996,7 @@ static long xrp_writeback_alien_mapping(struct xvp_file *xvp_file,
 static long __xrp_unshare_block(struct file *filp, struct xrp_mapping *mapping,
 				unsigned long flags)
 {
+	struct xvp_file *xvp_file = filp->private_data;
 	long ret = 0;
 	mm_segment_t oldfs = get_fs();
 
@@ -1006,6 +1005,11 @@ static long __xrp_unshare_block(struct file *filp, struct xrp_mapping *mapping,
 
 	switch (mapping->type & ~XRP_MAPPING_KERNEL) {
 	case XRP_MAPPING_NATIVE:
+		if (flags & XRP_FLAG_WRITE)
+			xrp_dma_sync_for_cpu(xvp_file->xvp,
+					     mapping->xrp_allocation->start,
+					     mapping->xrp_allocation->size,
+					     flags);
 		xrp_allocation_put(mapping->xrp_allocation);
 		break;
 
