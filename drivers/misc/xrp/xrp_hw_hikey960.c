@@ -34,15 +34,15 @@
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
-#include <asm/cacheflush.h>
 #include "xrp_hw.h"
-#include "xrp_hw_simple_dsp_interface.h"
+#include "xrp_hw_hikey960_dsp_interface.h"
+#include "xrp_ring_buffer.h"
 
 #include <linux/hisi/hisi_rproc.h>
 #include <ipcm/bsp_drv_ipc.h>
 #include <mailbox/drv_mailbox_msg.h>
 
-#define DRIVER_NAME "xrp-hw-hikey"
+#define DRIVER_NAME "xrp-hw-hikey960"
 
 enum xrp_irq_mode {
 	XRP_IRQ_NONE,
@@ -51,23 +51,11 @@ enum xrp_irq_mode {
 	XRP_IRQ_MAX,
 };
 
-struct ring_buffer {
-	uint32_t panic;
-	uint32_t interrupt;
-	uint32_t ccount;
-	uint32_t read;
-	uint32_t write;
-	uint32_t size;
-	uint32_t stack;
-	uint32_t reserved[9];
-	char data[0];
-};
-
 struct xrp_hw_hikey {
 	struct xvp *xrp;
 	struct device *dev;
 
-	struct ring_buffer __iomem *log_rb;
+	struct xrp_hw_hikey960_panic __iomem *panic;
 	uint32_t last_read;
 
 	/* how IRQ is used to notify the device of incoming data */
@@ -83,13 +71,13 @@ struct xrp_hw_hikey {
 static void *get_hw_sync_data(void *hw_arg, size_t *sz)
 {
 	struct xrp_hw_hikey *hw = hw_arg;
-	struct xrp_hw_simple_sync_data *hw_sync_data =
+	struct xrp_hw_hikey960_sync_data *hw_sync_data =
 		kmalloc(sizeof(*hw_sync_data), GFP_KERNEL);
 
 	if (!hw_sync_data)
 		return NULL;
 
-	*hw_sync_data = (struct xrp_hw_simple_sync_data){
+	*hw_sync_data = (struct xrp_hw_hikey960_sync_data){
 		.host_irq_mode = hw->host_irq_mode,
 		.device_irq_mode = hw->device_irq_mode,
 		.device_irq = hw->device_irq,
@@ -135,20 +123,18 @@ static void dump_regs(const char *fn, void *hw_arg)
 {
 	struct xrp_hw_hikey *hw = hw_arg;
 
-	if (!hw->log_rb)
+	if (!hw->panic)
 		return;
 
-	dev_info(hw->dev, "%s: panic = 0x%08x, ccount = 0x%08x, interrupt = 0x%08x\n",
+	dev_info(hw->dev, "%s: panic = 0x%08x, ccount = 0x%08x\n",
 		 fn,
-		 __raw_readl(&hw->log_rb->panic),
-		 __raw_readl(&hw->log_rb->ccount),
-		 __raw_readl(&hw->log_rb->interrupt));
-	dev_info(hw->dev, "%s: read = 0x%08x, write = 0x%08x, size = 0x%08x, stack = 0x%08x\n",
+		 __raw_readl(&hw->panic->panic),
+		 __raw_readl(&hw->panic->ccount));
+	dev_info(hw->dev, "%s: read = 0x%08x, write = 0x%08x, size = 0x%08x\n",
 		 fn,
-		 __raw_readl(&hw->log_rb->read),
-		 __raw_readl(&hw->log_rb->write),
-		 __raw_readl(&hw->log_rb->size),
-		 __raw_readl(&hw->log_rb->stack));
+		 __raw_readl(&hw->panic->rb.read),
+		 __raw_readl(&hw->panic->rb.write),
+		 __raw_readl(&hw->panic->rb.size));
 }
 
 static void dump_log_page(struct xrp_hw_hikey *hw)
@@ -156,13 +142,13 @@ static void dump_log_page(struct xrp_hw_hikey *hw)
 	char *buf;
 	size_t i;
 
-	if (!hw->log_rb)
+	if (!hw->panic)
 		return;
 
 	dump_regs(__func__, hw);
 	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (buf) {
-		memcpy_fromio(buf, hw->log_rb, PAGE_SIZE);
+		memcpy_fromio(buf, hw->panic, PAGE_SIZE);
 		for (i = 0; i < PAGE_SIZE; i += 64)
 			dev_info(hw->dev, "  %*pEhp\n", 64, buf + i);
 		kfree(buf);
@@ -245,14 +231,14 @@ static bool panic_check(void *hw_arg)
 	uint32_t write;
 	uint32_t size;
 
-	if (!hw->log_rb)
+	if (!hw->panic)
 		return false;
 
-	panic = __raw_readl(&hw->log_rb->panic);
-	ccount = __raw_readl(&hw->log_rb->ccount);
-	read = __raw_readl(&hw->log_rb->read);
-	write = __raw_readl(&hw->log_rb->write);
-	size = __raw_readl(&hw->log_rb->size);
+	panic = __raw_readl(&hw->panic->panic);
+	ccount = __raw_readl(&hw->panic->ccount);
+	read = __raw_readl(&hw->panic->rb.read);
+	write = __raw_readl(&hw->panic->rb.write);
+	size = __raw_readl(&hw->panic->rb.size);
 
 	if (read == 0 && read != hw->last_read) {
 		dev_warn(hw->dev, "****************** device restarted >>>>>>>>>>>>>>>>>\n");
@@ -282,18 +268,19 @@ static bool panic_check(void *hw_arg)
 		if (buf) {
 			uint32_t off = 0;
 
-			dev_info(hw->dev, "panic = 0x%08x, ccount = 0x%08x, read = %d, write = %d, size = %d, total = %d",
-				 panic, ccount, read, write, size, total);
+			dev_dbg(hw->dev, "panic = 0x%08x, ccount = 0x%08x read = %d, write = %d, size = %d, total = %d",
+				panic, ccount, read, write, size, total);
 
 			while (off != total) {
 				memcpy_fromio(buf + off,
-					      hw->log_rb->data + read,
+					      hw->panic->rb.data + read,
 					      tail);
 				read = 0;
 				off += tail;
 				tail = total - tail;
 			}
-			__raw_writel(write, &hw->log_rb->read);
+			__raw_writel(write, &hw->panic->rb.read);
+			hw->last_read = write;
 			dev_info(hw->dev, "<<<\n%.*s\n>>>\n",
 				 total, buf);
 			kfree(buf);
@@ -318,35 +305,6 @@ static bool panic_check(void *hw_arg)
 	return panic == 0xdeadbabe;
 }
 
-static bool cacheable(unsigned long pfn, unsigned long n_pages)
-{
-	return pfn_valid(pfn);
-}
-
-static void clean_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-	pr_debug("%s: vaddr = %p, paddr = %pa, sz = 0x%lx\n",
-	       __func__, vaddr, &paddr, sz);
-	if (pfn_valid(__phys_to_pfn(paddr))) {
-		dma_sync_single_for_device(dev, phys_to_dma(dev, paddr), sz,
-					   DMA_TO_DEVICE);
-	} else {
-		pr_debug("PFN is not valid, doing nothing\n");
-	}
-}
-
-static void flush_cache(void *vaddr, phys_addr_t paddr, unsigned long sz)
-{
-	pr_debug("%s: vaddr = %p, paddr = %pa, sz = 0x%lx\n",
-	       __func__, vaddr, &paddr, sz);
-	if (pfn_valid(__phys_to_pfn(paddr))) {
-		dma_sync_single_for_device(dev, phys_to_dma(dev, paddr), sz,
-					   DMA_FROM_DEVICE);
-	} else {
-		pr_debug("PFN is not valid, doing nothing\n");
-	}
-}
-
 static const struct xrp_hw_ops hw_ops = {
 	.enable = enable,
 	.disable = disable,
@@ -357,10 +315,6 @@ static const struct xrp_hw_ops hw_ops = {
 	.get_hw_sync_data = get_hw_sync_data,
 
 	.send_irq = send_irq,
-
-	.cacheable = cacheable,
-	.clean_cache = clean_cache,
-	.flush_cache = flush_cache,
 
 	.panic_check = panic_check,
 };
@@ -373,16 +327,16 @@ static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, mem_idx);
 	if (mem) {
-		hw->log_rb = devm_ioremap_resource(&pdev->dev, mem);
-		if (IS_ERR(hw->log_rb)) {
+		hw->panic = devm_ioremap_resource(&pdev->dev, mem);
+		if (IS_ERR(hw->panic)) {
 			dev_dbg(&pdev->dev,
 				"%s: couldn't ioremap abort/log region: %ld\n",
-				__func__, PTR_ERR(hw->log_rb));
-			hw->log_rb = NULL;
+				__func__, PTR_ERR(hw->panic));
+			hw->panic = NULL;
 		} else {
 			dev_dbg(&pdev->dev,
 				"%s: log ring buffer = %pap, mapped at %p\n",
-				__func__, &mem->start, hw->log_rb);
+				__func__, &mem->start, hw->panic);
 		}
 	}
 
@@ -420,19 +374,6 @@ static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
 typedef long init_function(struct platform_device *pdev,
 			   struct xrp_hw_hikey *hw);
 
-static init_function init;
-static long init(struct platform_device *pdev, struct xrp_hw_hikey *hw)
-{
-	long ret;
-	enum xrp_init_flags init_flags = 0;
-
-	ret = init_hw(pdev, hw, 0, &init_flags);
-	if (ret < 0)
-		return ret;
-
-	return xrp_init(pdev, init_flags, &hw_ops, hw);
-}
-
 static init_function init_v1;
 static long init_v1(struct platform_device *pdev, struct xrp_hw_hikey *hw)
 {
@@ -462,13 +403,10 @@ static long init_cma(struct platform_device *pdev, struct xrp_hw_hikey *hw)
 #ifdef CONFIG_OF
 static const struct of_device_id xrp_hw_hikey_match[] = {
 	{
-		.compatible = "cdns,xrp-hw-hikey",
-		.data = init,
-	}, {
-		.compatible = "cdns,xrp-hw-hikey,v1",
+		.compatible = "cdns,xrp-hw-hikey960,v1",
 		.data = init_v1,
 	}, {
-		.compatible = "cdns,xrp-hw-hikey,cma",
+		.compatible = "cdns,xrp-hw-hikey960,cma",
 		.data = init_cma,
 	}, {},
 };
@@ -506,6 +444,10 @@ static int xrp_hw_hikey_probe(struct platform_device *pdev)
 
 static int xrp_hw_hikey_remove(struct platform_device *pdev)
 {
+	/*
+	 * There's no way to disconnect from IPC or disable IPC IRQ.
+	 * Do it here when it's available.
+	 */
 	return xrp_deinit(pdev);
 }
 
@@ -534,5 +476,5 @@ static struct platform_driver xrp_hw_hikey_driver = {
 module_platform_driver(xrp_hw_hikey_driver);
 
 MODULE_AUTHOR("Max Filippov");
-MODULE_DESCRIPTION("XRP HiKey: low level device driver for Xtensa Remote Processing");
+MODULE_DESCRIPTION("XRP HiKey960: low level device driver for Xtensa Remote Processing");
 MODULE_LICENSE("Dual MIT/GPL");

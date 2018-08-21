@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2018 Cadence Design Systems Inc.
+# Copyright (c) 2017 Cadence Design Systems Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -30,6 +30,7 @@ xrp-$(CONFIG_CMA) += xrp_cma_alloc.o
 
 obj-$(CONFIG_XRP) += xrp.o
 obj-$(CONFIG_XRP_HW_SIMPLE) += xrp_hw_simple.o
-obj-$(CONFIG_XRP_HW_HIKEY) += xrp_hw_hikey.o
+obj-$(CONFIG_XRP_HW_HIKEY960) += xrp_hw_hikey960.o
+
 ccflags-$(CONFIG_XRP_DEBUG) += -DDEBUG
-ccflags-y += -I$(srctree)/drivers/hisi/hifi_mailbox
+ccflags-$(CONFIG_XRP_HW_HIKEY960) += -I$(srctree)/drivers/hisi/hifi_mailbox
