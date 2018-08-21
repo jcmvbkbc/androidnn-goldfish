@@ -223,7 +223,7 @@
 	xrp@0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
-		compatible = "cdns,xrp-hw-hikey,cma";
+		compatible = "cdns,xrp-hw-hikey960,cma";
 		memory-region = <&xrp_reserved>;
 		reg = <
 		       0x0 0x8b300000 0x0 0x00001000 /* Panic/log page */
