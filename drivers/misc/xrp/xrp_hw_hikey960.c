@@ -34,6 +34,7 @@
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
 #include "xrp_hw.h"
 #include "xrp_hw_hikey960_dsp_interface.h"
 #include "xrp_ring_buffer.h"
@@ -305,6 +306,109 @@ static bool panic_check(void *hw_arg)
 	return panic == 0xdeadbabe;
 }
 
+static ssize_t read(void *hw_arg, struct file *filp,
+		    char __user *user_buf, size_t sz, loff_t *ppos)
+{
+	struct xrp_hw_hikey *hw = hw_arg;
+	uint32_t read;
+	uint32_t write;
+	uint32_t size;
+	ssize_t total_read = 0;
+	struct xrp_ring_buffer __iomem *rb = &hw->panic->rb;
+
+	if (sz == 0)
+		return 0;
+
+	if (!hw->panic)
+		return 0;
+
+start:
+	read = __raw_readl(&rb->read);
+	write = __raw_readl(&rb->write);
+	size = __raw_readl(&rb->size);
+
+	if (!(write < size && read < size && size < PAGE_SIZE))
+		goto bad_state;
+
+	while (total_read < sz) {
+		char b;
+
+		if (read == write) {
+			__raw_writel(read, &rb->read);
+			if (total_read)
+				return total_read;
+bad_state:
+			if (filp->f_flags & O_NONBLOCK)
+				return total_read ? total_read : -EAGAIN;
+			if (signal_pending(current))
+				return total_read ? total_read : -EINTR;
+			schedule();
+			goto start;
+		}
+
+		b = __raw_readb(rb->data + read);
+		if (copy_to_user(user_buf + total_read, &b, 1))
+			return -EINVAL;
+		if (++read >= size)
+			read = 0;
+		++total_read;
+	}
+	__raw_writel(read, &rb->read);
+	return total_read;
+}
+
+static ssize_t write(void *hw_arg, struct file *filp,
+		     const char __user *buf, size_t sz, loff_t *ppos)
+{
+	struct xrp_hw_hikey *hw = hw_arg;
+	uint32_t read;
+	uint32_t write;
+	uint32_t size;
+	ssize_t total_written = 0;
+	struct xrp_ring_buffer __iomem *rb = (void __iomem *)hw->panic + PAGE_SIZE;
+
+	if (sz == 0)
+		return 0;
+
+	if (!hw->panic)
+		return 0;
+
+start:
+	read = __raw_readl(&rb->read);
+	write = __raw_readl(&rb->write);
+	size = __raw_readl(&rb->size);
+
+	if (!(write < size && read < size && size < PAGE_SIZE))
+		goto bad_state;
+
+	while (total_written < sz) {
+		uint32_t next_write = write + 1;
+		char b;
+
+		if (next_write >= size)
+			next_write = 0;
+		if (next_write == read) {
+			__raw_writel(write, &rb->write);
+			if (total_written)
+				return total_written;
+bad_state:
+			if (filp->f_flags & O_NONBLOCK)
+				return total_written ? total_written : -EAGAIN;
+			if (signal_pending(current))
+				return total_written ? total_written : -EINTR;
+			schedule();
+			goto start;
+		}
+		if (copy_from_user(&b, buf + total_written, 1))
+			return -EINVAL;
+		__raw_writeb(b, rb->data + write);
+		write = next_write;
+		++total_written;
+	}
+	__raw_writel(write, &rb->write);
+	return total_written;
+}
+
 static const struct xrp_hw_ops hw_ops = {
 	.enable = enable,
 	.disable = disable,
@@ -317,6 +421,9 @@ static const struct xrp_hw_ops hw_ops = {
 	.send_irq = send_irq,
 
 	.panic_check = panic_check,
+
+	.read = read,
+	.write = write,
 };
 
 static long init_hw(struct platform_device *pdev, struct xrp_hw_hikey *hw,
