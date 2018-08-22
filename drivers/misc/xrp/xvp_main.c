@@ -1640,6 +1640,28 @@ static int xvp_close(struct inode *inode, struct file *filp)
 	return 0;
 }
 
+static ssize_t xrp_read(struct file *filp, char __user *buf, size_t sz, loff_t *ppos)
+{
+	struct xvp_file *xvp_file = filp->private_data;
+	struct xvp *xvp = xvp_file->xvp;
+
+	pr_debug("%s\n", __func__);
+	if (xvp->hw_ops->read)
+		return xvp->hw_ops->read(xvp->hw_arg, filp, buf, sz, ppos);
+	return -ENOSYS;
+}
+
+static ssize_t xrp_write(struct file *filp, const char __user *buf, size_t sz, loff_t *ppos)
+{
+	struct xvp_file *xvp_file = filp->private_data;
+	struct xvp *xvp = xvp_file->xvp;
+
+	pr_debug("%s\n", __func__);
+	if (xvp->hw_ops->write)
+		return xvp->hw_ops->write(xvp->hw_arg, filp, buf, sz, ppos);
+	return -ENOSYS;
+}
+
 static inline int xvp_enable_dsp(struct xvp *xvp)
 {
 	if (loopback < LOOPBACK_NOMMIO &&
@@ -1725,6 +1747,8 @@ static const struct file_operations xvp_fops = {
 	.mmap = xvp_mmap,
 	.open = xvp_open,
 	.release = xvp_close,
+	.read = xrp_read,
+	.write = xrp_write,
 };
 
 int xrp_runtime_suspend(struct device *dev)

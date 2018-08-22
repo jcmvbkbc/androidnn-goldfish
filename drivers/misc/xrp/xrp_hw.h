@@ -79,6 +79,11 @@ struct xrp_hw_ops {
 
 	/* check DSP status */
 	bool (*panic_check)(void *hw_arg);
+
+	ssize_t (*read)(void *hw_arg, struct file *filp,
+			char __user *buf, size_t sz, loff_t *ppos);
+	ssize_t (*write)(void *hw_arg, struct file *filp,
+			 const char __user *buf, size_t sz, loff_t *ppos);
 };
 
 enum xrp_init_flags {
