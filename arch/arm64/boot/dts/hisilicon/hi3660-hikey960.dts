@@ -226,7 +226,7 @@
 		compatible = "cdns,xrp-hw-hikey960,cma";
 		memory-region = <&xrp_reserved>;
 		reg = <
-		       0x0 0x8b300000 0x0 0x00001000 /* Panic/log page */
+		       0x0 0x8b300000 0x0 0x00002000 /* Panic/log pages */
 		       0x0 0x8b301000 0x0 0x0037f000 /* Shared memory */
 		      >;
 		device-irq = <3>;
